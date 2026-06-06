@@ -66,7 +66,7 @@ This document describes how to build a general-use version outside Stripe.
 
 A Minion-like coding agent should be able to:
 
-1. Accept a natural-language coding task from a UI, Slack, CLI, API, issue, or ticket.
+1. Accept a natural-language coding task from a UI, CLI, or API.
 2. Allocate an isolated sandbox with the repository checked out.
 3. Give the model safe but powerful tools for reading, editing, searching, and testing code.
 4. Let the model work unattended within explicit budgets.
@@ -77,7 +77,7 @@ A Minion-like coding agent should be able to:
 9. Scale to multiple parallel tasks.
 10. Measure quality through evals, production traces, and regression suites.
 
-The system should optimize for "verified progress", not "impressive conversation".
+The system should optimize for verified progress.
 A successful agent run produces concrete artifacts:
 
     - branch name

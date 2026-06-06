@@ -1,0 +1,9 @@
+Channel adapters: one per platform (Baileys for WhatsApp, grammY for Telegram, and so on). Each one normalizes inbound messages into a common internal format and serializes replies back out to the right platform. Decoupling the channels from the agent is what lets you swap Telegram for Slack without touching anything else, the agent never knows or cares which app a message came from.
+
+Session manager: resolves who's talking and in what context. Direct messages collapse into one main session; group chats each get their own. This sounds trivial but isn't: without it, your boss and your spouse messaging the same agent from different apps would clobber each other's context, and the agent would blend two unrelated conversations into mush.
+
+Queue: serializes runs per session. Real agent turns take seconds to minutes, so if a new message arrives mid-run, the queue decides whether to hold it, inject it, or collect it for a follow-up turn. Without a queue, two messages landing at once cause race conditions, the agent trips over itself.
+
+Agent runtime: the heart. It assembles context (we'll meet the cast of files in a moment: AGENTS.md, SOUL.md, TOOLS.md, MEMORY.md, the daily log, conversation history) and then runs the agent loop from the start of the chapter: call model → execute tool calls → feed results back → repeat until done. Every agent uses this loop; OpenClaw's particular flavor is that it persists its context as plain Markdown files between turns.
+
+Control plane: a WebSocket API (on port 18789) that everything else connects to: the CLI, the macOS app, the web UI, the iOS and Android clients. One control surface for the whole system.
