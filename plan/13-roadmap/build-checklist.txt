@@ -1,0 +1,205 @@
+================================================================================
+BUILD CHECKLIST
+================================================================================
+
+Use this checklist to track completeness. Check items off as you build.
+
+PHASE 1 — CORE (MVP)
+--------------------------------------------------------------------------------
+
+State + Persistence:
+    [ ] AgentState object implemented
+    [ ] State serialized to/from JSON
+    [ ] SQLite DB with tasks, sessions, node_runs tables
+    [ ] State persisted before and after every node
+
+Blueprint Engine:
+    [ ] BlueprintEngine runs node graph in sequence
+    [ ] Failure transitions wired for all nodes
+    [ ] Exception handling: error recorded, state saved, continue to failure_next
+    [ ] Budget enforcement: turns, cost, wall time
+    [ ] Cancellation: flag checked before each node + each model call
+
+LLM Subsession:
+    [ ] run_subsession() loop: call -> tool execute -> continue
+    [ ] IsDoneChecker: structured output, checks task + diff + tests
+    [ ] Nudge loop: inject nudge if not done, up to N times
+    [ ] Tool execution wrapper: schema validation, timeout, output truncation
+    [ ] Context management: summarize old tool outputs at 80% window
+
+Core Coding Tools:
+    [ ] read_file with line numbers
+    [ ] apply_patch (unified diff)
+    [ ] replace_in_file
+    [ ] write_file (for new files)
+    [ ] list_files
+    [ ] search_repo (ripgrep)
+    [ ] get_repo_map (tree-sitter)
+    [ ] run_shell (with exit code, preview, artifact)
+    [ ] run_tests (with parsed failures)
+    [ ] git_status, git_diff, git_log
+
+Blueprint Nodes (devloop):
+    [ ] 01 CHECK_FOR_CLEAN_BRANCH
+    [ ] 02 LOAD_TASK
+    [ ] 03 PREPARE_CONTEXT (context bundle, repo rules, repo map)
+    [ ] 04 IMPLEMENT_TASK (LLM subsession)
+    [ ] 05 CHECKPOINT_DEVELOPMENT
+    [ ] 06 GATHER_CHANGED_FILES
+    [ ] 07 SETUP_WORKSPACE_HOOKS
+    [ ] 08 LINT_AND_FORMAT (python + node at minimum)
+    [ ] 09 FIX_LINT_FAILURES (LLM subsession)
+    [ ] 10 POLICY_AND_SECRET_SCAN (gitleaks)
+    [ ] 11 PUBLIC_REPO_REVIEW (conditional)
+    [ ] 12 RUN_RELATED_TESTS (LLM subsession)
+    [ ] 13 PUSH_BRANCH (deterministic)
+    [ ] 14 WAIT_FOR_BACKGROUND_HOOKS
+    [ ] 15 GENERATE_PR_DESCRIPTION (LLM call)
+    [ ] 16 CREATE_OR_UPDATE_PR (GitHub API)
+    [ ] 17 POLL_CI
+    [ ] 18 FIX_CI_FAILURES (LLM subsession)
+    [ ] 19 FINALIZE_AND_NOTIFY
+    [ ] 20 END (terminal statuses)
+
+Sandbox:
+    [ ] Docker container per task (docker-py)
+    [ ] Base image with git, ripgrep, Python, Node
+    [ ] Task-scoped GitHub token injected at start
+    [ ] No host filesystem access
+    [ ] Container stops after task (or retained for debug)
+
+Context + Prompts:
+    [ ] Context bundle built in node 03
+    [ ] Prompt layers 1-8 assembled
+    [ ] Repo rules read from AGENTS.md / CLAUDE.md
+    [ ] Auto-tools run before first LLM call
+    [ ] Prompt versions tracked in model_calls
+
+Observability (basic):
+    [ ] JSONL trace file per task
+    [ ] All 20 standard event types emitted
+    [ ] model_calls table populated
+    [ ] tool_calls table populated
+    [ ] Artifacts stored for full shell outputs, diffs, etc.
+
+CLI + Control Plane:
+    [ ] CLI adapter: submit task, watch output
+    [ ] WebSocket control plane: broadcast trace events
+    [ ] Cancellation via CLI/control plane
+    [ ] Message injection via CLI
+
+Evals:
+    [ ] 2+ fixture repos
+    [ ] 8 MVP acceptance tests passing
+    [ ] Layer 1 unit tests for tools + blueprint
+
+PHASE 2 — TOOL REGISTRY + LOOPS
+--------------------------------------------------------------------------------
+
+Tool System:
+    [ ] Formal ToolRegistry with ToolSpec
+    [ ] Toolsets: dev, readonly, discovery, integration
+    [ ] Sensitivity levels + environment restrictions
+    [ ] Tool unit tests (schema, permission, success, failure, truncation)
+
+Approval Flow:
+    [ ] Two-phase protocol: request + execute
+    [ ] Approval records in DB
+    [ ] Control plane broadcasts ApprovalRequest
+    [ ] Web UI approve/deny buttons
+    [ ] Approval expiry
+
+Model Gateway:
+    [ ] LiteLLM backend (or custom)
+    [ ] Routing policy: strong for implementation, cheap for classification
+    [ ] Spend tracking: model_calls rows + rollup queries
+    [ ] Per-task cost limit enforcement
+    [ ] Retry on transient errors (3x exponential backoff)
+    [ ] Request/response logging with redaction
+
+Prompt Loops:
+    [ ] PromptLoop entity in DB
+    [ ] Loop engine: trigger matching + task instantiation
+    [ ] Cron trigger type
+    [ ] GitHub events trigger type
+    [ ] Jinja2 template rendering
+    [ ] Loop run history in DB
+    [ ] Loop management UI (create, edit, disable, history)
+    [ ] Output policies: notify, open_pr, post_comment, silent
+    [ ] Rate limiting: max_runs_per_day, max_concurrent
+
+CI Loop:
+    [ ] Node 17 POLL_CI: poll commit check statuses
+    [ ] Node 18 FIX_CI_FAILURES: LLM subsession with CI logs
+    [ ] Max CI fix loops budget
+    [ ] Failure classification: branch-related vs baseline/flaky
+
+Additional Tools:
+    [ ] docs_search
+    [ ] issue_read (GitHub API)
+    [ ] code_search (tree-sitter)
+    [ ] package_manager_info
+
+PHASE 3 — SUBAGENTS + 3D UI
+--------------------------------------------------------------------------------
+
+Subagent System:
+    [ ] SubtaskSpec entity
+    [ ] Planning agent blueprint + DECOMPOSE_TASK subsession
+    [ ] Worker agent blueprint (trimmed devloop)
+    [ ] spawn_subagent() function
+    [ ] Work queue with dependency resolution
+    [ ] WAIT_FOR_SUBTASKS node
+    [ ] Reviewer agent blueprint
+    [ ] Integration agent (merge subtask branches, conflict resolution)
+    [ ] Parent-child task linking in DB + trace
+    [ ] Budget inheritance from parent to children
+
+3D Mind Palace TUI:
+    [ ] Textual app with floor layout
+    [ ] Grid of agent rooms with status colors
+    [ ] Keyboard navigation (tab, enter, esc, arrows)
+    [ ] Live log panel per room
+    [ ] Live diff panel per room
+    [ ] Approval overlay
+    [ ] WebSocket connection to control plane
+
+Quality:
+    [ ] Layer 3 golden tasks (20 tasks)
+    [ ] LLM judge scorer
+    [ ] Failure taxonomy classification
+    [ ] Regression workflow (baseline comparison before deploy)
+    [ ] Warm sandbox pool (N pre-warmed containers per repo)
+
+PHASE 4 — DISCOVERY TOOLS + CHANNELS
+--------------------------------------------------------------------------------
+
+Discovery Tools:
+    [ ] web_search (Brave/Bing/Serper API)
+    [ ] web_fetch (Playwright or requests)
+    [ ] local_server_start/stop/request
+    [ ] local_server_install_deps
+    [ ] browser_open, browser_screenshot, browser_click, browser_type
+    [ ] browser_evaluate
+    [ ] vlm_describe_screenshot (vision model call)
+    [ ] vlm_compare_screenshots
+
+Additional Channels:
+    [ ] Telegram adapter (grammY bot)
+    [ ] WhatsApp adapter (Baileys)
+    [ ] Full Slack integration (events, interactive buttons)
+
+Google Integrations:
+    [ ] Google OAuth flow
+    [ ] gdrive_read, gdrive_create
+    [ ] gcal_list_events
+    [ ] gmail_read, gmail_send (approval-gated)
+
+Production Infrastructure:
+    [ ] VM/microVM sandbox option
+    [ ] Network egress policy enforcement
+    [ ] Prometheus metrics + Grafana dashboards
+    [ ] OpenTelemetry spans
+    [ ] LLM tracing platform integration (Braintrust or Langfuse)
+    [ ] tmux backend for 3D TUI
+    [ ] Multi-region sandbox pool

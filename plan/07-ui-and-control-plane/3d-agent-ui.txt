@@ -1,0 +1,135 @@
+================================================================================
+3D MIND PALACE AGENT UI
+================================================================================
+
+VISION
+--------------------------------------------------------------------------------
+
+From README.txt: "3D UI to help track each agent (mind palace) — this but better.
+Python (Textual), Go (Bubble Tea / Lipgloss), Floors = Tabs/Views;
+Rooms = Named Grid Containers, tmux backend, textual-terminal widgets"
+
+Reference inspiration: agent-deck (https://github.com/asheshgoplani/agent-deck)
+
+The mind palace UI is a terminal application that spatially represents
+the state of all running agents. Instead of a flat list of tasks, you get
+a navigable 3D space (within terminal constraints) where each agent has a
+"room" that shows its live state.
+
+Key insight: developers spend significant time context-switching between
+multiple agent runs. A spatial representation reduces that cognitive overhead.
+You can glance at the grid and immediately see which agents are blocked,
+which are running, which are waiting for your approval.
+
+LAYOUT METAPHOR
+--------------------------------------------------------------------------------
+
+    FLOOR (top-level view — selected via tab or number key):
+
+        Floor 1: All Active Agents
+        Floor 2: My Submitted Tasks
+        Floor 3: Prompt Loops
+        Floor 4: Eval Runs
+        Floor 5: System Health
+
+    ROOM (one per agent/task — named grid container on a floor):
+
+        [  agent/task_abc  ]    [  agent/task_def  ]    [  agent/task_ghi  ]
+        [ Implementing...  ]    [ Waiting for CI   ]    [ NEEDS APPROVAL   ]
+        [ █████░░░░ 52%    ]    [ ██████████ 100%  ]    [ !! approve push  ]
+        [ $0.18 | 4m32s    ]    [ $0.31 | 12m05s   ]    [ $0.09 | 2m11s   ]
+
+    CELL (panel within a room — can be expanded to full screen):
+
+        When a room is focused/expanded:
+            Left panel:   Live log stream (tool calls, model turns)
+            Right panel:  Current diff (live-updated)
+            Bottom panel: Status bar (node, cost, time, budget)
+            Overlay:      Approval request (if waiting for human)
+
+SPATIAL NAVIGATION
+--------------------------------------------------------------------------------
+
+    Tab / Shift+Tab     — cycle between rooms
+    Arrow keys          — navigate grid
+    Enter               — expand room to full screen
+    Esc                 — collapse back to grid
+    1-5                 — switch floors
+    c                   — cancel focused task (with confirmation)
+    i                   — inject message into focused task
+    a                   — approve pending approval for focused task
+    d                   — deny pending approval for focused task
+    r                   — view full trace for focused task (opens diff/trace view)
+    l                   — view full log for focused task
+    /                   — search tasks by name/status
+    q                   — quit
+
+ROOM STATES (color coded)
+--------------------------------------------------------------------------------
+
+    Gray + spinner      — running normally
+    Blue + spinner      — waiting for subagent
+    Yellow + !          — needs approval
+    Green + checkmark   — completed successfully
+    Red + X             — failed
+    Orange + pause      — paused / waiting for CI
+    Purple + loop       — prompt loop running
+
+IMPLEMENTATION OPTIONS
+--------------------------------------------------------------------------------
+
+Option A: Python + Textual (recommended for v1)
+    - Textual is a modern Python TUI framework
+    - Rich library for styled output, diff highlighting
+    - WebSocket client built-in (connect to control plane)
+    - Slower but easier to build and maintain
+    - Good component library: DataTable, Log, Tabs, Grid
+
+Option B: Go + Bubble Tea + Lipgloss
+    - Faster, more responsive for dense output
+    - Lipgloss for styling
+    - More work to build from scratch
+    - Better for production hardening
+
+Option C: tmux backend + textual-terminal
+    - Use tmux for actual terminal multiplexing
+    - Each agent gets a real tmux pane
+    - Textual wraps the tmux layout
+    - Allows reattaching to agent shell for debugging
+    - Most flexible but most complex
+
+Recommendation: Start with Textual (Option A) for the mind palace dashboard.
+Add tmux backend (Option C) when you need interactive shell access to agent
+sandboxes.
+
+TMUX INTEGRATION DESIGN (Option C)
+--------------------------------------------------------------------------------
+
+    tmux session: "agent-palace"
+    window layout:
+        window 0: grid overview (Textual dashboard)
+        window 1..N: one window per active task
+            pane 0 (left):  agent log stream (tail -f artifact log)
+            pane 1 (right): live diff viewer (watch git diff)
+            pane 2 (bottom): status bar
+
+    From the grid overview, pressing Enter on a task switches to its tmux window.
+    Pressing Esc in a task window returns to the grid overview.
+
+    This approach gives you real terminal access to each sandbox's output
+    while the Textual layer handles the birds-eye view.
+
+MINIMAL V1 UI (before the palace)
+--------------------------------------------------------------------------------
+
+The mind palace is a v3+ feature. For v1, a simple web UI is sufficient:
+
+    Web UI (Next.js or simple HTML):
+        /tasks              — list of tasks with status badges
+        /tasks/{id}         — task detail: status, diff, trace, logs, buttons
+        /loops              — list of prompt loops with run history
+        /loops/{id}         — loop detail: runs, edit template, manual trigger button
+        /approvals          — pending approvals with approve/deny buttons
+
+    The web UI connects to the control plane via WebSocket for live updates.
+    No polling. Status updates appear in real time.

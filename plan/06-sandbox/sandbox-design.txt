@@ -1,0 +1,143 @@
+================================================================================
+SANDBOX DESIGN
+================================================================================
+
+PURPOSE
+--------------------------------------------------------------------------------
+
+The sandbox provides the isolated execution environment for every coding task.
+It must give the agent:
+    - a real shell
+    - the repository checked out
+    - language runtimes and dependencies
+    - enough network to fetch packages, hit git provider, call model gateway
+    - no production credentials, no host filesystem access
+
+And it must prevent:
+    - one agent corrupting another's workspace
+    - production database mutations
+    - leaking internal credentials
+    - escaping to the host
+
+MVP: DOCKER SANDBOX
+--------------------------------------------------------------------------------
+
+One container per task. Simple, well-understood, fast to implement.
+
+Base Dockerfile strategy:
+
+    FROM ubuntu:24.04
+
+    # System tools
+    RUN apt-get install -y git curl jq ripgrep build-essential ca-certificates
+
+    # Language managers (install what your repos need)
+    RUN curl -LsSf https://astral.sh/uv/install.sh | sh   # Python (uv)
+    RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash && apt-get install -y nodejs
+    RUN npm install -g pnpm
+    # Go, Rust, Ruby as needed
+
+    # GitHub CLI
+    RUN gh_version=... && curl -L .../gh_${gh_version}_linux_amd64.tar.gz | tar xz
+
+    # Agent runner
+    COPY . /agent
+    RUN uv pip install /agent
+
+    # Non-root user
+    RUN useradd -m -s /bin/bash agent
+    USER agent
+    WORKDIR /workspace
+
+Container lifecycle per task:
+
+    1. Pull or build base image (warm: already built)
+    2. Start container with task-scoped environment variables
+    3. Clone or mount repo into /workspace
+    4. Create working branch
+    5. Run blueprint engine inside container
+    6. Store logs/artifacts outside container (mounted volume or upload)
+    7. Push branch if gates pass
+    8. Stop container (or retain for debug window)
+
+Environment variables injected:
+
+    REPO_URL=...
+    GITHUB_TOKEN=<task-scoped read+push token>   # NOT a personal token
+    TASK_ID=...
+    BRANCH_NAME=...
+    AGENT_API_URL=...    # gateway endpoint for model calls
+    ARTIFACT_UPLOAD_URL=...
+
+Public repo push safety (see safety-security/):
+    During implementation, set git remote push URL to a local bare repo.
+    Only after policy review passes does deterministic code restore real remote.
+
+PRODUCTION: VM / MICROVM SANDBOX
+--------------------------------------------------------------------------------
+
+For stronger isolation use ephemeral VMs per task.
+
+Options:
+    - Firecracker microVMs (sub-second boot, ~4MB per VM overhead)
+    - Kata Containers (OCI-compatible, hardware isolation)
+    - Cloud VMs: EC2 spot instances, GCE preemptible, Fly.io machines
+
+Benefits over Docker:
+    - Full kernel isolation (not just namespaces)
+    - Cannot escape via kernel exploits
+    - Separate network namespace with proper egress control
+    - Better resource accounting
+
+Tradeoffs:
+    - Slower to provision (~5-30s vs <1s for Docker)
+    - More complex to manage
+    - More expensive
+
+When to upgrade: when you have public-facing users, when you run untrusted
+code from third-party repos, or when compliance requires VM-level isolation.
+
+WARM POOLS
+--------------------------------------------------------------------------------
+
+Cold start (clone + install deps) takes 2-10 minutes per task.
+Warm pools reduce this to <30 seconds.
+
+Pre-warm strategy:
+    - Base image: always warm (pulled to host before tasks run)
+    - Repo clone: maintain N containers/VMs with repo cloned at HEAD
+    - Dep cache: pre-installed language dependencies
+    - Code index: pre-built tree-sitter repo map
+
+Warm pool lifecycle:
+    1. Pool manager maintains N warm sandboxes per repo (N = 2-5)
+    2. Periodically updates from base_branch
+    3. Scheduler requests sandbox: pool manager assigns warm one, creates branch
+    4. After task: pool manager recycles or destroys, starts replacement
+
+Pool sizing:
+    - Scale N to P95 concurrency for that repo
+    - For new repos: start N=1, grow based on queue depth
+
+SANDBOX RETENTION POLICY
+--------------------------------------------------------------------------------
+
+Default:
+    Destroy sandbox 2 hours after task completes (success or failure)
+
+Extended:
+    Failed sandboxes: retain 24 hours
+    Partial completion: retain 48 hours
+    User-flagged "keep this": retain 7 days
+
+User experience:
+    The web UI should have a "Re-open sandbox" button that reconnects to
+    a retained sandbox for debugging. This is a high-leverage feature for
+    developer trust.
+
+Resource budgets per sandbox:
+    CPU:    4 cores
+    Memory: 8 GB
+    Disk:   20 GB (ephemeral)
+    Wall time: max_wall_seconds from task budget
+    Network egress: monitored, logged

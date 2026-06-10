@@ -1,0 +1,87 @@
+================================================================================
+PROJECT VISION
+================================================================================
+
+WHAT WE ARE BUILDING
+--------------------------------------------------------------------------------
+
+A cloud coding agent platform. Not a chatbot. Not a one-shot script generator.
+A full remote software development system where:
+
+    - The user submits a task (natural language, issue URL, Slack message, etc.)
+    - The system allocates an isolated devbox with the repo checked out
+    - An autonomous agent inspects the code, implements the change, runs tests,
+      fixes lint, scans for secrets, and opens a pull request
+    - The human gets a trace page showing exactly what happened, every tool call,
+      every file changed, every test result
+    - The system can spawn subagents for complex tasks
+    - The user can define prompt loops that recur on triggers or schedules
+
+THREE SOURCE INFLUENCES
+--------------------------------------------------------------------------------
+
+1. STRIPE MINION PATTERN (see roadmap.txt)
+   The key insight: the LLM should live inside a deterministic engineering
+   envelope. Deterministic code handles all operational work. The model handles
+   only what requires judgment. This produces verifiable, auditable runs.
+
+2. OPENCLAW ARCHITECTURE (see openclaw-arch.txt)
+   OpenClaw gives us a clean pattern for multi-channel agent systems:
+   - Channel adapters normalize messages from any platform
+   - A session manager keeps context separated per user/chat
+   - A queue serializes agent turns to prevent race conditions
+   - A WebSocket control plane connects all clients to one server
+   - Context is stored as plain Markdown files between turns
+
+3. README IDEAS
+   From the rough notes:
+   - Tiered tool discovery: web search -> local server spin-up -> browser + VLM
+   - Tiered repo navigation: from file tree to symbol search to code search
+   - Custom agent states beyond LangGraph primitives
+   - Subagent system: planner, work checker, work queue, worker pool
+   - 3D UI: a "mind palace" TUI showing agent state visually
+   - Google account integrations
+
+THE USER'S CORE WORKFLOW
+--------------------------------------------------------------------------------
+
+    Submit task
+        -> agent allocates sandbox
+        -> agent runs devloop blueprint (20 deterministic + LLM nodes)
+        -> agent produces PR, branch, trace, and final report
+        -> user sees live status via control plane
+        -> user can inject messages mid-run or cancel
+
+    For complex tasks:
+        -> planning subagent decomposes into subtasks
+        -> worker agents handle each subtask in parallel sandboxes
+        -> reviewer agent checks assembled diff
+        -> integration agent merges and validates
+
+    For recurring behaviors:
+        -> user defines a prompt loop with trigger conditions
+        -> system executes the loop on each trigger
+        -> results are logged and summarized
+
+WHAT SUCCESS LOOKS LIKE
+--------------------------------------------------------------------------------
+
+    v0 (Week 2):
+        Agent takes a task, edits code in a local repo, runs tests, produces
+        a diff. No sandbox. No PR. Just a working implementation loop.
+
+    v1 (Week 6):
+        Sandboxed runs, PR creation, trace page, cancellation. One real PR
+        from a real bug fix. Human can watch it happen.
+
+    v2 (Week 10):
+        Subagent spawning. User-defined prompt loops. Model gateway. Tool
+        registry with approval gates.
+
+    v3 (Week 16):
+        3D agent UI. CI feedback loop. Warm sandbox pool. Eval suite.
+        Production metrics.
+
+    v4 (beyond):
+        Multi-channel (Slack, Telegram, WhatsApp). Google integrations.
+        Browser + VLM tools. Local server tools. Full production platform.

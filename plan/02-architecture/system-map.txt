@@ -1,0 +1,156 @@
+================================================================================
+SYSTEM MAP — FULL COMPONENT ARCHITECTURE
+================================================================================
+
+INBOUND LAYER (Channel Adapters)
+--------------------------------------------------------------------------------
+
+    +--------------------+  +--------------------+  +--------------------+
+    | CLI Adapter        |  | Web UI Adapter     |  | Slack Adapter      |
+    | (direct stdin)     |  | (HTTP POST)        |  | (slash command)    |
+    +--------+-----------+  +--------+-----------+  +--------+-----------+
+             |                       |                       |
+    +--------------------+  +--------------------+  +--------------------+
+    | Telegram Adapter   |  | WhatsApp/Baileys   |  | GitHub Events      |
+    | (grammY)           |  | Adapter            |  | (webhooks)         |
+    +--------+-----------+  +--------+-----------+  +--------+-----------+
+             |                       |                       |
+             +----------+------------+----------+-----------+
+                        |
+                        v
+             +----------+----------+
+             | Message Normalizer  |
+             | InboundMessage fmt  |
+             +----------+----------+
+                        |
+                        v
+
+CONTROL PLANE
+--------------------------------------------------------------------------------
+
+    +------------------------------------------------+
+    | WebSocket Control Plane  (port 18789)          |
+    | - all clients connect here                     |
+    | - broadcasts status, logs, trace events        |
+    | - accepts cancellation, injection signals      |
+    +------------------------+-----------------------+
+                             |
+                             v
+
+TASK API + SESSION LAYER
+--------------------------------------------------------------------------------
+
+    +------------------------+   +------------------------+
+    | Task API (FastAPI)     |-->| Task DB (Postgres)     |
+    | - auth, validation     |   | - tasks, sessions      |
+    | - task creation        |   | - node_runs            |
+    | - status endpoints     |   | - model/tool calls     |
+    +------------------------+   | - artifacts, approvals |
+             |                   +------------------------+
+             v
+    +------------------------+
+    | Session Manager        |
+    | - resolves user+context|
+    | - DM vs group session  |
+    | - loads context files  |
+    +------------------------+
+             |
+             v
+    +------------------------+
+    | Turn Queue             |
+    | - serializes per session
+    | - holds mid-run msgs   |
+    | - injects or queues    |
+    +------------------------+
+             |
+             v
+
+SCHEDULER + SANDBOX POOL
+--------------------------------------------------------------------------------
+
+    +------------------------+   +------------------------+
+    | Scheduler              |-->| Sandbox Pool           |
+    | - task queue           |   | - Docker containers    |
+    | - concurrency limits   |   | - warm pre-cloned imgs |
+    | - user/team quotas     |   | - repo + dep cache     |
+    | - priority, retry      |   | - task-scoped creds    |
+    +------------------------+   +------------------------+
+             |                            |
+             v                            v
+    +-----------------------------------------------+
+    |  Agent Runner (Blueprint Engine)              |
+    |  - runs devloop node graph                    |
+    |  - persists before/after every node           |
+    |  - enforces budgets, cancellation             |
+    |  - emits trace events                         |
+    +------------------------+----------------------+
+             |                       |
+             v                       v
+
+SUBAGENT SYSTEM                MODEL GATEWAY
+--------------------------------------------------------------------------------
+
+    +--------------------+   +--------------------+
+    | Planning Agent     |   | Model Gateway      |
+    | Reviewer Agent     |   | (LiteLLM / custom) |
+    | Worker Agents (N)  |   | - routing, fallback|
+    | Lint-Fix Agent     |   | - spend tracking   |
+    | CI-Fix Agent       |   | - rate limits      |
+    +--------------------+   | - request logging  |
+             |               +--------------------+
+             v
+    +--------------------+
+    | Prompt Loop Engine |
+    | - trigger registry |
+    | - loop execution   |
+    | - loop history     |
+    +--------------------+
+
+TOOL LAYER
+--------------------------------------------------------------------------------
+
+    +-----------------------------------------------+
+    |  Tool Registry (MCP-compatible)               |
+    +-----------------------------------------------+
+    | Core Coding     | Discovery     | Integration  |
+    | read_file       | web_search    | github_pr    |
+    | write_file      | docs_search   | issue_read   |
+    | apply_patch     | repo_map      | ci_status    |
+    | run_shell       | code_search   | slack_post   |
+    | run_tests       | local_server  | gmail_send   |
+    | git_diff/status | browser_open  | gdrive_read  |
+    | list_files      | screenshot    | gcal_events  |
+    | search_repo     | vlm_describe  |              |
+    +-----------------------------------------------+
+             |
+             v
+
+GIT + CI PROVIDERS
+--------------------------------------------------------------------------------
+
+    +---------------------+   +---------------------+
+    | Git Provider        |   | CI Provider         |
+    | GitHub / GitLab     |   | GitHub Actions      |
+    | branch, PR, issues  |   | CircleCI, Jenkins   |
+    +---------------------+   +---------------------+
+
+OBSERVABILITY
+--------------------------------------------------------------------------------
+
+    +---------------------+   +---------------------+
+    | Trace Store         |   | Eval Platform       |
+    | JSONL -> OTel       |   | fixture repos       |
+    | Braintrust/Langfuse |   | golden tasks        |
+    | metrics dashboard   |   | LLM judge + human   |
+    +---------------------+   +---------------------+
+
+UI LAYER
+--------------------------------------------------------------------------------
+
+    +---------------------+   +---------------------+
+    | Web Status Page     |   | 3D Mind Palace TUI  |
+    | task list, diffs    |   | (Textual / BubbleTea|
+    | trace viewer        |   | Floors=Views        |
+    | approval buttons    |   | Rooms=Agent Grids   |
+    | diff viewer         |   | tmux backend panels |
+    +---------------------+   +---------------------+

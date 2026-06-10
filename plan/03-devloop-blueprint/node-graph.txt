@@ -1,0 +1,94 @@
+================================================================================
+DEVLOOP BLUEPRINT — NODE GRAPH
+================================================================================
+
+The devloop is the core coding pipeline. Every coding task runs this graph.
+Nodes alternate between deterministic (D) and LLM subsession (L) types.
+
+PRIMARY FLOW
+--------------------------------------------------------------------------------
+
+    01 CHECK_FOR_CLEAN_BRANCH       (D)
+        -> 02 LOAD_TASK             (D)
+        -> 03 PREPARE_CONTEXT       (D + optional retrieval)
+        -> 04 IMPLEMENT_TASK        (L) *** main implementation subsession ***
+        -> 05 CHECKPOINT_DEVELOPMENT (D)
+        -> 06 GATHER_CHANGED_FILES  (D)
+        -> 07 SETUP_WORKSPACE_HOOKS (D)
+        -> 08 LINT_AND_FORMAT       (D + auto-fix)
+        -> 09 FIX_LINT_FAILURES     (L, optional)
+        -> 10 POLICY_AND_SECRET_SCAN (D)
+        -> 11 PUBLIC_REPO_REVIEW    (D + L reviewer with no tools, if public)
+        -> 12 RUN_RELATED_TESTS     (L, optional)
+        -> 13 PUSH_BRANCH           (D)
+        -> 14 WAIT_FOR_BACKGROUND_HOOKS (D)
+        -> 15 GENERATE_PR_DESCRIPTION (L single call)
+        -> 16 CREATE_OR_UPDATE_PR   (D)
+        -> 17 POLL_CI               (D, if enabled)
+        -> 18 FIX_CI_FAILURES       (L, optional)
+        -> 19 FINALIZE_AND_NOTIFY   (D)
+        -> 20 END
+
+MID-RUN USER INPUT (any node)
+--------------------------------------------------------------------------------
+
+    Any node, when pending_user_messages is non-empty:
+        -> DRAIN_USER_INPUT         (L subsession or deterministic merge)
+        -> GATHER_CHANGED_FILES or END
+
+FAILURE TRANSITIONS
+--------------------------------------------------------------------------------
+
+    01 CHECK_FOR_CLEAN_BRANCH failure    -> END (fatal: no safe workspace)
+    02 LOAD_TASK failure                 -> END (fatal: no task to run)
+    03 PREPARE_CONTEXT failure           -> 04 IMPLEMENT_TASK (degraded context)
+    04 IMPLEMENT_TASK failure            -> 05 CHECKPOINT_DEVELOPMENT (partial work)
+    05 CHECKPOINT_DEVELOPMENT failure    -> 06 GATHER_CHANGED_FILES (non-fatal)
+    06 GATHER_CHANGED_FILES failure      -> END (cannot proceed without diff)
+    07 SETUP_WORKSPACE_HOOKS failure     -> 08 LINT_AND_FORMAT (non-fatal warning)
+    08 LINT_AND_FORMAT failure           -> 09 FIX_LINT_FAILURES
+    09 FIX_LINT_FAILURES failure         -> 10 POLICY_AND_SECRET_SCAN (record failure)
+    10 POLICY_AND_SECRET_SCAN failure    -> END if severe; else 11 (annotated)
+    11 PUBLIC_REPO_REVIEW failure        -> END (do not push)
+    12 RUN_RELATED_TESTS failure         -> 13 PUSH_BRANCH (draft PR)
+    13 PUSH_BRANCH failure               -> 19 FINALIZE_AND_NOTIFY (branch-only)
+    17 POLL_CI failure                   -> 19 FINALIZE_AND_NOTIFY
+    18 FIX_CI_FAILURES failure           -> 19 FINALIZE_AND_NOTIFY
+    19 FINALIZE_AND_NOTIFY failure       -> END (save artifacts, do not retry)
+
+TERMINAL STATUSES
+--------------------------------------------------------------------------------
+
+    succeeded_pr_created
+    succeeded_branch_created
+    partially_completed         — work done but some validations failed
+    failed_no_changes           — model ran but made no changes
+    failed_safety_gate          — policy/public-repo scan blocked push
+    failed_environment          — sandbox or tool failure
+    cancelled                   — user requested
+    timed_out                   — budget exhausted
+
+SUBAGENT DEVLOOP VARIANT
+--------------------------------------------------------------------------------
+
+Worker agents spawned by the planning agent run a trimmed blueprint:
+
+    01 CHECK_FOR_CLEAN_BRANCH
+    -> 03 PREPARE_CONTEXT (subtask context)
+    -> 04 IMPLEMENT_SUBTASK (LLM subsession)
+    -> 05 CHECKPOINT_DEVELOPMENT
+    -> 08 LINT_AND_FORMAT
+    -> 10 POLICY_AND_SECRET_SCAN
+    -> 19 FINALIZE_SUBTASK (no PR, just diff + trace)
+    -> END
+
+The planning agent and integration agent handle PR assembly.
+
+ONLY-IMPLEMENT VARIANT (local dev mode)
+--------------------------------------------------------------------------------
+
+When only_implement=True (no push, no PR):
+
+    01 -> 02 -> 03 -> 04 -> 05 -> 19 -> END
+
+Used for local sandbox mode where the human reviews the diff themselves.

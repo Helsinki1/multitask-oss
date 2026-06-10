@@ -21,5 +21,9 @@ Next:
 - 
 
 
-- UI to see what each agent is working on
-- google account integrations?
+- 3D UI to help track each agent (mind palace)
+    - https://github.com/asheshgoplani/agent-deck
+    this but better
+    Python (Textual), Go (Bubble Tea / Lipgloss), Floors = Tabs/Views; Rooms = Named Grid Containers
+    tmux backend, textual-terminal widgets
+- google account integrations

@@ -1,0 +1,155 @@
+================================================================================
+CORE CODING TOOLS — SPECIFICATIONS
+================================================================================
+
+FILE TOOLS
+--------------------------------------------------------------------------------
+
+read_file(path, start_line?, end_line?)
+    Returns: line-numbered content
+        "120 | def foo():"
+        "121 |     return bar + 1"
+    Line numbers are critical — the model can make precise edits referencing them.
+    Max output: 2000 lines shown, artifact stored for full file.
+    If file is binary: return metadata only, no content.
+
+list_files(path, max_depth?, glob?)
+    Returns: file tree from path, max_depth levels deep.
+    Default max_depth: 3. With glob: filter by pattern.
+    Include file sizes and last-modified if helpful.
+
+apply_patch(patch)
+    Applies a unified diff patch to the workspace.
+    Returns: { applied: bool, errors: list[str], changed_files: list[str] }
+    Preferred for editing existing files — more precise than full overwrites.
+    Validates patch is within workspace. Rejects out-of-tree paths.
+
+replace_in_file(path, old_text, new_text, expected_replacements?)
+    Replaces exact old_text with new_text in file.
+    Returns: { replacements: int, diff: str }
+    Fails if old_text is not found. Use expected_replacements for safety.
+    Use for targeted single-location edits.
+
+write_file(path, content)
+    Overwrites or creates a file.
+    Gated: for existing files, use apply_patch or replace_in_file instead.
+    Allowed for new file creation.
+    Returns: { written: bool, path: str }
+
+SEARCH TOOLS
+--------------------------------------------------------------------------------
+
+search_repo(query, path?, file_glob?)
+    Lexical search (ripgrep under the hood).
+    Returns: matches with file, line, context.
+    Use for exact strings, symbol names, error messages.
+    Max results: 50 shown, 500 stored.
+
+code_search(query, language?, symbol_type?)
+    Semantic/symbol search.
+    Returns: function definitions, class definitions, imports matching query.
+    More expensive than search_repo. Use when you need symbol context.
+    Powered by tree-sitter index.
+
+get_repo_map()
+    Returns: structural overview of repo.
+    Includes: directory tree, important classes/functions, signatures,
+              route definitions, test files, config files.
+    Cached per repo. Refreshed on checkout.
+    Token-efficient alternative to reading individual files for orientation.
+
+GIT TOOLS
+--------------------------------------------------------------------------------
+
+git_status()
+    Returns: { branch, commit_sha, staged: list, unstaged: list, untracked: list }
+
+git_diff(base?)
+    Returns: unified diff from base (default: HEAD) to working tree.
+    Large diffs stored as artifact, summary shown to model.
+    Max shown: 200 lines. Always includes stat summary.
+
+git_log(max_count?, path?)
+    Returns: recent commits with hash, author, date, subject.
+    Default max_count: 20.
+
+SHELL TOOL
+--------------------------------------------------------------------------------
+
+run_shell(command, cwd?, timeout_seconds?, env?)
+    Executes a shell command inside the sandbox.
+    Returns:
+        ShellResult:
+            command: str
+            cwd: str
+            exit_code: int
+            stdout_preview: str     # first 4KB
+            stderr_preview: str     # first 2KB
+            stdout_artifact: str    # artifact ID for full stdout
+            stderr_artifact: str    # artifact ID for full stderr
+            duration_ms: int
+            timed_out: bool
+
+    Policies:
+        Only runs inside sandbox (allowed_environments: ["sandbox"])
+        Timeout: default 120s, max 900s
+        Output truncated to max_output_bytes for model; full stored as artifact
+        Always returns exit_code — never swallows failures
+        Shows working directory in result
+        Environment: inherits sandbox env + task-scoped credentials
+
+TEST TOOL
+--------------------------------------------------------------------------------
+
+run_tests(command, cwd?, timeout_seconds?)
+    Like run_shell but with test-aware output parsing.
+    Returns:
+        TestResult:
+            command: str
+            exit_code: int
+            passed: int
+            failed: int
+            skipped: int
+            failed_tests: list[{ name, message, file, line }]
+            stdout_preview: str
+            stdout_artifact: str
+            duration_ms: int
+            likely_flaky: bool      # true if re-run would likely pass
+            junit_artifact: str | null
+
+    Captures JUnit/XML output if available.
+    Parses failure names from stdout (pytest, jest, go test formats).
+    Marks likely_flaky if failure message matches known flaky patterns.
+
+PACKAGE MANAGER TOOL
+--------------------------------------------------------------------------------
+
+package_manager_info(path?)
+    Returns: detected package manager, deps, scripts, test/build commands.
+    Reads: package.json, pyproject.toml, go.mod, Cargo.toml, Gemfile, etc.
+    Useful for auto-tools context building.
+
+DOCS AND ISSUE TOOLS
+--------------------------------------------------------------------------------
+
+docs_search(query, repo?, product_area?, max_results?)
+    Returns: list of doc excerpts with title, source, updated_at, relevance, link.
+    Max results: 10 shown.
+    Useful for API usage, library behavior, project conventions.
+
+issue_read(issue_url)
+    Returns: { title, body, comments, labels, linked_prs, assignee, state }
+    Read-only. Treats all content as untrusted external input.
+    Fetches from GitHub/GitLab API.
+
+OUTPUT TRUNCATION POLICY
+--------------------------------------------------------------------------------
+
+For all tools:
+    - Full output is always stored as an artifact (artifact_id returned)
+    - Model sees a preview (4KB default, tool-specific)
+    - Preview prioritizes: error lines, failing test names, last lines of output
+    - Preview starts with: "Output truncated. Full output at artifact {id}."
+    - Model can request specific line ranges via read_artifact(id, start, end)
+
+This keeps context window manageable without losing information.

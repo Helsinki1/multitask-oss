@@ -1,0 +1,199 @@
+================================================================================
+COMPONENT DESCRIPTIONS
+================================================================================
+
+CHANNEL ADAPTERS
+--------------------------------------------------------------------------------
+One adapter per inbound platform. Each normalizes messages to InboundMessage.
+The agent runtime never knows which channel sent the message.
+
+    CLI adapter         — reads from stdin, writes to stdout
+    Web UI adapter      — receives HTTP POST from browser
+    Slack adapter       — slash command handler + interactive buttons
+    GitHub Events       — webhook receiver for issues, PRs, comments
+    Telegram adapter    — grammY bot
+    WhatsApp adapter    — Baileys library
+
+InboundMessage schema:
+    channel: str            # "cli" | "web" | "slack" | "telegram" | "github"
+    user_id: str
+    session_id: str
+    content: str
+    attachments: list[Attachment]
+    metadata: dict          # channel-specific extras (issue_url, pr_url, etc.)
+
+MESSAGE NORMALIZER
+--------------------------------------------------------------------------------
+Validates and enriches InboundMessage. Resolves user identity across channels.
+Optionally expands issue URLs into full issue context.
+
+WEBSOCKET CONTROL PLANE (port 18789)
+--------------------------------------------------------------------------------
+Inspired by OpenClaw. A single WebSocket server that all clients connect to.
+- Broadcasts live status updates, trace events, log lines
+- Accepts cancellation signals from any client
+- Accepts mid-run message injection ("user said: also fix the test")
+- Clients: CLI, web UI, mobile apps, 3D TUI
+
+This decouples all UI from the agent. New UI = new WebSocket client.
+
+TASK API (FastAPI)
+--------------------------------------------------------------------------------
+HTTP REST API. Handles:
+    POST /tasks          — create new task
+    GET  /tasks/{id}     — task status + result
+    GET  /tasks/{id}/trace — full trace
+    POST /tasks/{id}/cancel — cancel
+    POST /tasks/{id}/inject — inject message mid-run
+    GET  /sessions       — user's sessions
+    POST /loops          — create prompt loop
+    GET  /loops          — list prompt loops
+    DELETE /loops/{id}   — delete loop
+    GET  /approvals      — pending approvals
+    POST /approvals/{id}/approve
+    POST /approvals/{id}/deny
+
+TASK DB (Postgres / SQLite for local)
+--------------------------------------------------------------------------------
+Stores all persistent state. Schema is in 10-state-and-persistence/database-schema.txt.
+Tables: tasks, sessions, node_runs, model_calls, tool_calls, artifacts,
+        approvals, validation_results, prompt_loops, loop_runs
+
+SESSION MANAGER
+--------------------------------------------------------------------------------
+Adapted from OpenClaw's design. Responsibilities:
+    - Given a user_id + channel, resolve the correct session
+    - DMs: one main session per user per channel
+    - Group chats: one session per group
+    - Coding tasks: one session per task (isolated)
+    - Load session context files: AGENTS.md, SOUL.md, TOOLS.md, MEMORY.md,
+      daily log, conversation history
+    - Pass context bundle to agent runtime
+
+TURN QUEUE
+--------------------------------------------------------------------------------
+Serializes agent runs per session. When a new message arrives:
+    - If no run is active: start run immediately
+    - If a run is active and message is non-urgent: hold message, inject after turn
+    - If a run is active and message is urgent (cancel, inject): forward to
+      control plane immediately
+
+Without a queue: two messages arriving at once cause race conditions.
+
+SCHEDULER
+--------------------------------------------------------------------------------
+Manages task lifecycle across all users/repos:
+    - Maintains a priority queue of pending tasks
+    - Allocates sandboxes from the pool
+    - Enforces per-user and per-repo concurrency limits
+    - Retries on infrastructure failure (not agent failure)
+    - Cancels stale tasks
+    - Triggers prompt loops on schedule/event
+
+SANDBOX POOL
+--------------------------------------------------------------------------------
+Manages isolated execution environments. See 06-sandbox/ for full detail.
+    - Docker containers (MVP)
+    - Ephemeral VMs (production)
+    - Warm pre-cloned images (performance)
+    - Task-scoped credentials injected at runtime
+
+AGENT RUNNER (BLUEPRINT ENGINE)
+--------------------------------------------------------------------------------
+The heart of the system. Executes the devloop node graph:
+    - Loads session state from DB
+    - Runs nodes in sequence (deterministic or LLM subsession)
+    - Persists state before and after every node
+    - Emits trace events to observability layer
+    - Enforces turn/cost/time budgets
+    - Handles cancellation signals from control plane
+    - On exception: records error, moves to failure node, saves state
+
+See 03-devloop-blueprint/ for full node specifications.
+
+SUBAGENT SYSTEM
+--------------------------------------------------------------------------------
+Manages lifecycle of child agents spawned for complex tasks.
+    - Planning agent: reads task, decomposes into subtasks, no write access
+    - Worker agents: one per subtask, each gets own sandbox + branch
+    - Reviewer agent: reads assembled diff, writes critique, no push access
+    - Lint-fix agent: nested LLM subsession for lint failures
+    - CI-fix agent: nested LLM subsession for CI failures
+
+Communication: via shared task DB and artifact store. No real-time agent chat.
+
+PROMPT LOOP ENGINE
+--------------------------------------------------------------------------------
+First-class prompt loop system. See 04-subagent-system/prompt-loops.txt.
+    - Stores PromptLoop entities in DB
+    - Trigger types: cron, GitHub event, webhook, manual
+    - On trigger: instantiates a task with the loop's prompt template
+    - Passes to scheduler as a normal task
+    - Records loop_runs for history
+
+MODEL GATEWAY
+--------------------------------------------------------------------------------
+See 09-model-gateway/ for full detail.
+    - Unified API for multiple model providers
+    - Routing policy: strong models for implementation, cheap for classification
+    - Spend tracking per task/user/team
+    - Rate limits and retry
+    - Request/response logging with redaction
+    - LiteLLM-based or custom
+
+TOOL REGISTRY
+--------------------------------------------------------------------------------
+See 05-tool-system/ for full detail.
+    - MCP-compatible tool registry
+    - Each tool has: name, description, schema, sensitivity, timeout,
+      requires_human_confirmation, allowed_environments
+    - Tools are grouped into toolsets: "dev", "discovery", "browser", "admin"
+    - Each toolset is appropriate for specific node types
+
+GIT PROVIDER INTEGRATION
+--------------------------------------------------------------------------------
+GitHub primary, GitLab secondary.
+    - Checkout / clone into sandbox
+    - Branch creation and push
+    - PR creation and update
+    - PR draft/ready-for-review status
+    - Issue read (linked from task)
+    - CI status polling (commit statuses, check runs)
+    - Label/reviewer assignment
+
+Uses GitHub CLI (gh) + GitHub API. No model-controlled push.
+
+CI PROVIDER INTEGRATION
+--------------------------------------------------------------------------------
+    - GitHub Actions (primary)
+    - CircleCI, Jenkins (secondary, via generic polling)
+    - Polls commit check status after branch push
+    - Fetches failed job logs (up to budget)
+    - Classifies failure as branch-related vs baseline/flaky
+
+TRACE STORE + OBSERVABILITY
+--------------------------------------------------------------------------------
+See 11-observability/ for full detail.
+    - JSONL trace events → OpenTelemetry spans (production)
+    - LLM tracing: Braintrust or Langfuse for model call inspection
+    - Prometheus/Grafana for aggregate metrics
+    - Per-task trace page in web UI
+
+EVAL PLATFORM
+--------------------------------------------------------------------------------
+See 11-observability/ for full detail.
+    - Fixture repos with golden tasks
+    - Deterministic scorers: tests pass, files changed correctly, no secrets
+    - LLM judge scorers: task completed semantically, PR description truthful
+    - Human scorers: accept/reject, correctness
+    - Regression workflow before each deploy
+
+3D MIND PALACE TUI
+--------------------------------------------------------------------------------
+See 07-ui-and-control-plane/3d-agent-ui.txt for full detail.
+Inspired by agent-deck. A terminal UI showing all active agents spatially:
+    - Floors = top-level views (All Agents, My Tasks, Loops, Evals)
+    - Rooms = named grid containers (one per active agent or task group)
+    - Cells = live log panels, diff views, status indicators
+    - Built with Textual (Python) or Bubble Tea / Lipgloss (Go)
+    - tmux backend for terminal multiplexing

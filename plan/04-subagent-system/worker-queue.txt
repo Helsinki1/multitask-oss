@@ -1,0 +1,144 @@
+================================================================================
+WORKER QUEUE + WORKER AGENTS
+================================================================================
+
+PURPOSE
+--------------------------------------------------------------------------------
+
+Worker agents are the implementation engines. Each one runs the trimmed devloop
+blueprint on a single subtask, in its own sandbox and branch.
+
+A work queue manages which workers are running, how many are active, and
+how their results feed back into the parent task.
+
+WORK QUEUE DESIGN
+--------------------------------------------------------------------------------
+
+The work queue is built on top of the existing task scheduler.
+Subtask tasks are normal tasks with:
+    parent_task_id set
+    subtask_role = "worker"
+    priority inherited from parent
+
+Queue rules:
+    - Respect per-user concurrency limits (default: 3 concurrent workers per user)
+    - Respect per-repo concurrency limits (default: 2 workers per repo at once)
+    - Workers for the same parent task run in parallel if no dependency
+    - Dependent subtasks wait for their prerequisite to complete
+
+DEPENDENCY RESOLUTION PSEUDOCODE
+--------------------------------------------------------------------------------
+
+    def get_runnable_subtasks(parent_task_id) -> list[SubtaskSpec]:
+        all_subtasks = db.get_subtasks(parent_task_id)
+        completed_ids = {s.id for s in all_subtasks if s.status == "done"}
+        runnable = []
+        for s in all_subtasks:
+            if s.status == "pending":
+                if all(dep in completed_ids for dep in s.dependencies):
+                    runnable.append(s)
+        return runnable
+
+    async def tick_work_queue(parent_task_id):
+        runnable = get_runnable_subtasks(parent_task_id)
+        active = db.count_active_subtasks(parent_task_id)
+        slots = MAX_CONCURRENT_WORKERS - active
+
+        for subtask in runnable[:slots]:
+            task_id = spawn_subagent(parent_state, subtask, role="worker")
+            db.mark_subtask_enqueued(subtask.id, task_id)
+
+WORKER AGENT BLUEPRINT (trimmed devloop)
+--------------------------------------------------------------------------------
+
+    01 CHECK_FOR_CLEAN_BRANCH
+    -> 03 PREPARE_CONTEXT (subtask context bundle)
+    -> 04 IMPLEMENT_SUBTASK (LLM subsession)
+    -> 05 CHECKPOINT_DEVELOPMENT
+    -> 08 LINT_AND_FORMAT
+    -> 09 FIX_LINT_FAILURES (optional)
+    -> 10 POLICY_AND_SECRET_SCAN
+    -> FINALIZE_SUBTASK (no push, no PR — just diff + trace)
+    -> END
+
+Key differences from full devloop:
+    - No PUSH_BRANCH (parent integration agent handles this)
+    - No PR creation
+    - No CI polling
+    - Runs on own branch: agent/{parent_task_id}-sub-{subtask_id}
+
+WORKER AGENT CONTEXT
+--------------------------------------------------------------------------------
+
+Worker's TASK.md includes:
+    - The specific subtask description (files_to_modify, files_to_read, test_hint)
+    - Parent task summary (for broader context)
+    - Only the files_to_read are pre-loaded (not full repo)
+
+Worker should NOT modify files outside its files_to_modify list.
+If it discovers it needs to modify other files: record in trace and stop,
+report to parent. Do not silently expand scope.
+
+WORKER OUTPUT
+--------------------------------------------------------------------------------
+
+    WorkerResult:
+        subtask_id: str
+        task_id: str
+        branch_name: str
+        status: str             # "completed" | "partial" | "failed"
+        changed_files: list[str]
+        diff_artifact_id: str
+        validation_results: list[ValidationResult]
+        summary: str
+        errors: list[str]
+        cost_usd: float
+        duration_seconds: float
+
+Stored in task DB, artifact store. Parent integration agent reads these.
+
+INTEGRATION AGENT
+--------------------------------------------------------------------------------
+
+After all workers complete (or timeout), parent spawns integration agent.
+
+Integration agent blueprint:
+    01 CHECK_FOR_CLEAN_BRANCH (on integration branch based off base)
+    -> COLLECT_WORKER_RESULTS (D)
+    -> MERGE_SUBTASK_BRANCHES  (D — git cherry-pick or merge each subtask branch)
+    -> HANDLE_MERGE_CONFLICTS  (L subsession if conflicts)
+    -> VALIDATE_INTEGRATION    (D — run tests on merged result)
+    -> GENERATE_INTEGRATION_PR (L single call — summary of all subtask work)
+    -> CREATE_OR_UPDATE_PR     (D)
+    -> POLL_CI
+    -> FINALIZE_AND_NOTIFY
+
+Integration agent gets:
+    - All worker diffs as artifacts
+    - All worker validation results
+    - Reviewer critique (if reviewer was spawned)
+    - Parent task description
+
+MERGE STRATEGY
+--------------------------------------------------------------------------------
+
+    For non-conflicting subtask branches:
+        git checkout integration-branch
+        git cherry-pick or git merge --no-ff each subtask branch in dependency order
+
+    For conflicts:
+        Run HANDLE_MERGE_CONFLICTS LLM subsession
+        Tools: read_file, apply_patch, git_status, git_diff
+        Prompt: "These branches conflict on {files}. Resolve the conflict
+        in a way that satisfies both subtask intents. Here are both versions."
+        Max turns: 20
+
+MONITORING PARENT TASK
+--------------------------------------------------------------------------------
+
+Parent task waits in WAIT_FOR_SUBTASKS node. It:
+    - Polls subtask statuses every 30s
+    - Broadcasts live progress to control plane: "Worker 1/3 complete"
+    - Times out if any worker exceeds max_subtask_wait_seconds
+    - On timeout: marks that subtask as failed, continues with completed workers
+    - Final report includes which subtasks succeeded and which failed

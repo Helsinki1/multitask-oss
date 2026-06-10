@@ -1,0 +1,145 @@
+================================================================================
+SUBAGENT SYSTEM — DESIGN MODEL
+================================================================================
+
+PHILOSOPHY
+--------------------------------------------------------------------------------
+
+The most productive multi-agent pattern is not agents chatting with each other
+in real time. It is independent agents working on separate sandboxes, connected
+through shared state in a database.
+
+    Task A -> Planning Agent -> Subtask 1 -> Worker A -> Branch A
+                             -> Subtask 2 -> Worker B -> Branch B
+                             -> Subtask 3 -> Worker C -> Branch C
+                                          -> Reviewer  -> Critique
+                             -> Integration Agent -> PR
+
+Agents communicate via:
+    - Shared task DB (read subtask results, write critique)
+    - Artifact store (read diffs, write analysis)
+    - Not: real-time message passing, shared context windows
+
+SUBAGENT ROLES
+--------------------------------------------------------------------------------
+
+PLANNING AGENT
+    Input:  complex task text + repo map + context bundle
+    Output: decomposed subtasks (list of SubtaskSpec)
+    Access: read-only tools (read_file, search_repo, get_repo_map)
+    No sandbox write access, no push access
+    See: 04-subagent-system/planning-agent.txt
+
+WORKER AGENT
+    Input:  single SubtaskSpec + context
+    Output: diff + trace + validation results
+    Access: full dev toolset
+    Own sandbox, own branch
+    Runs trimmed devloop (no PR creation)
+    See: 04-subagent-system/worker-queue.txt
+
+REVIEWER AGENT
+    Input:  task + assembled diff + worker traces + validation results
+    Output: structured critique (CritiqueReport)
+    Access: read-only tools (read_file, git_diff, search_repo)
+    No sandbox write access, no push access
+    See: 04-subagent-system/reviewer-agent.txt
+
+INTEGRATION AGENT
+    Input:  subtask branches + reviewer critique
+    Output: merged branch, PR
+    Access: git tools, PR creation
+    Runs in own sandbox
+
+LINT-FIX AGENT
+    Nested inside devloop node 09.
+    Targeted LLM subsession for lint failures. Not a separate sandbox.
+
+CI-FIX AGENT
+    Nested inside devloop node 18.
+    Targeted LLM subsession for CI failures. May push new commit.
+
+SPAWNING MECHANISM
+--------------------------------------------------------------------------------
+
+A subagent is spawned by creating a new task in the task DB with:
+    - parent_task_id: pointing to the parent task
+    - subtask_role: "worker" | "reviewer" | "integration"
+    - task_text: the subtask description
+    - context from parent's context_bundle
+    - Same budget constraints as parent, minus parent's usage
+
+The scheduler treats spawned tasks as normal tasks. Priority is inherited
+from parent (or elevated if parent is blocked on the subtask).
+
+SPAWNING PSEUDOCODE
+--------------------------------------------------------------------------------
+
+    def spawn_subagent(parent_state, subtask_spec, role) -> str:
+        task_id = generate_task_id()
+        branch_name = f"agent/{task_id}-{slugify(subtask_spec.title)}"
+
+        task = Task(
+            id=task_id,
+            parent_task_id=parent_state.task_id,
+            user_id=parent_state.user_id,
+            repo_url=parent_state.repo_url,
+            base_branch=parent_state.working_branch if role == "worker" else parent_state.base_branch,
+            task_text=subtask_spec.description,
+            task_source="subagent",
+            subtask_role=role,
+            budgets=BudgetState(
+                max_llm_turns=50,
+                max_wall_seconds=3600,
+                max_cost_usd=parent_state.budgets.remaining_cost / len(subtasks)
+            ),
+        )
+
+        db.insert(task)
+        scheduler.enqueue(task_id)
+        return task_id
+
+WAITING FOR SUBAGENTS
+--------------------------------------------------------------------------------
+
+Parent task enters a WAIT_FOR_SUBTASKS node after spawning.
+
+    WAIT_FOR_SUBTASKS (Deterministic):
+        Poll task DB every 30s for subtask status
+        Time out after max_subtask_wait_seconds (default: 2 hours)
+        On all subtasks done:
+            Collect subtask diffs, traces, validation results
+            Trigger REVIEWER (spawn reviewer agent)
+            Then INTEGRATION_MERGE
+
+PARENT-CHILD TRACE LINKING
+--------------------------------------------------------------------------------
+
+Every trace event from a subagent carries both:
+    task_id: subtask_id
+    parent_task_id: parent_task_id
+
+The trace UI can render the full tree: parent -> children -> grandchildren.
+
+BUDGET INHERITANCE
+--------------------------------------------------------------------------------
+
+When a parent spawns N subtasks:
+    remaining_budget = parent.budgets.max_cost - parent.budgets.used_cost
+    per_subtask = remaining_budget / (N + overhead_factor)
+
+If a subtask exceeds its budget: mark subtask failed, continue with others.
+Parent reports partial completion.
+
+SUBTASK SPEC FORMAT
+--------------------------------------------------------------------------------
+
+    SubtaskSpec:
+        id: str
+        title: str
+        description: str            # full implementation instructions
+        files_to_modify: list[str]  # hints from planning agent
+        files_to_read: list[str]    # context hints
+        dependencies: list[str]     # other subtask IDs that must complete first
+        test_hint: str              # how to verify this subtask
+        priority: int               # 1 = highest

@@ -1,0 +1,242 @@
+================================================================================
+DEVLOOP — BLUEPRINT ENGINE
+================================================================================
+
+The blueprint engine is the orchestrator that runs the node graph.
+It is a pure state machine: every node is a function from state to (state, next_node).
+
+ENGINE PSEUDOCODE
+--------------------------------------------------------------------------------
+
+    class BlueprintEngine:
+        def __init__(self, nodes, state_store, tracer, budget_enforcer, cancellation):
+            self.nodes = nodes
+            self.state_store = state_store
+            self.tracer = tracer
+            self.budget_enforcer = budget_enforcer
+            self.cancellation = cancellation
+
+        async def run(self, session_id: str) -> AgentState:
+            state = self.state_store.load(session_id)
+
+            while state.current_node != "END":
+
+                # Cancellation check
+                if self.cancellation.is_cancelled(session_id):
+                    state = state.with_status("cancelled")
+                    self.tracer.emit("task.cancelled", state)
+                    break
+
+                # Budget check
+                if self.budget_enforcer.is_exhausted(state):
+                    state = state.with_status("timed_out")
+                    self.tracer.emit("task.budget_exhausted", state)
+                    break
+
+                node = self.nodes[state.current_node]
+                node_run = self.tracer.start_node(session_id, node.name)
+                self.state_store.save(state)  # persist before node starts
+
+                try:
+                    result = await node.run(state)
+                    state = state.apply(result.state_update)
+                    state = state.with_node(result.next_node)
+                    self.tracer.end_node(node_run, result)
+                    self.state_store.save(state)  # persist after node completes
+
+                except CancellationException:
+                    state = state.with_status("cancelled")
+                    self.tracer.node_cancelled(node_run)
+                    self.state_store.save(state)
+                    break
+
+                except Exception as e:
+                    self.tracer.node_exception(node_run, e)
+                    state = state.add_error(NodeError(
+                        node=node.name,
+                        message=str(e),
+                        exception_type=type(e).__name__,
+                        retryable=is_retryable(e),
+                    ))
+                    next_on_failure = node.failure_next or "END"
+                    state = state.with_node(next_on_failure)
+                    self.state_store.save(state)
+
+            return state
+
+NODE INTERFACE
+--------------------------------------------------------------------------------
+
+    class Node:
+        name: str
+        node_type: str        # "deterministic" | "llm_subsession" | "terminal"
+        failure_next: str     # node to go to on exception (default: "END")
+
+        async def run(self, state: AgentState) -> NodeResult:
+            raise NotImplementedError
+
+    class NodeResult:
+        next_node: str
+        state_update: dict
+        status: str           # "ok" | "warning" | "failed" | "end"
+        artifacts: list[ArtifactRef]
+        errors: list[NodeError]
+
+LLM SUBSESSION CONTRACT
+--------------------------------------------------------------------------------
+
+    class SubsessionConfig:
+        name: str
+        system_prompt: str
+        initial_human_message: str
+        tools: list[ToolSpec]
+        auto_tools_enabled: bool    # run auto-tools before first LLM call
+        max_turns: int
+        max_wall_seconds: int
+        max_cost_usd: float
+        max_context_tokens: int
+        allow_edits: bool
+        allow_shell: bool
+        allow_network: bool
+        completion_checker: CompletionCheckerConfig
+
+    async def run_subsession(config: SubsessionConfig, state: AgentState) -> SubsessionResult:
+        messages = build_initial_messages(config, state)
+
+        if config.auto_tools_enabled:
+            auto_context = await run_auto_tools(state)
+            messages.append(tool_context_message(auto_context))
+
+        for turn in range(config.max_turns):
+            enforce_budget(config, state)  # raises BudgetExhaustedException if over
+
+            response = await model_gateway.chat(
+                messages=messages,
+                tools=config.tools,
+                model=select_model(config.name),
+                temperature=config.temperature,
+                metadata={"task_id": state.task_id, "node": config.name}
+            )
+            tracer.model_response(response, state)
+
+            if response.tool_calls:
+                for call in response.tool_calls:
+                    result = await execute_tool_safely(call, state, config)
+                    messages.append(format_tool_result(call, result))
+                    tracer.tool_call(call, result, state)
+                continue
+
+            # No tool calls — check if done
+            done = await check_is_done(config, state, messages, response)
+            if done.is_done:
+                return SubsessionResult(
+                    status="done",
+                    messages=messages,
+                    summary=response.content,
+                    exchange_id=state.exchange_id
+                )
+
+            # Not done — nudge
+            messages.append(system_nudge(done.missing_steps, done.reason))
+
+        return SubsessionResult(status="budget_exhausted", messages=messages)
+
+TOOL EXECUTION WRAPPER
+--------------------------------------------------------------------------------
+
+    async def execute_tool_safely(call, state, config) -> ToolResult:
+        tool = registry.get(call.name)
+        if tool is None:
+            return ToolResult(error="unknown_tool", name=call.name)
+
+        try:
+            validate_schema(tool.schema, call.arguments)
+        except SchemaError as e:
+            return ToolResult(error="invalid_arguments", message=str(e))
+
+        if not tool.allowed_in_environment(state.sandbox_backend):
+            return ToolResult(error="not_allowed_in_environment")
+
+        if tool.requires_human_confirmation:
+            approval = await request_or_check_approval(call, state)
+            if not approval.approved:
+                return ToolResult(
+                    error="approval_required",
+                    approval_url=approval.url,
+                    approval_id=approval.id
+                )
+
+        if budget_enforcer.tool_over_budget(state):
+            return ToolResult(error="tool_budget_exceeded")
+
+        async with timeout(tool.timeout_seconds):
+            try:
+                output = await tool.call(call.arguments, state)
+                return truncate_and_structure_output(output, tool)
+            except TimeoutError:
+                return ToolResult(error="tool_timeout", timed_out=True)
+            except Exception as e:
+                return ToolResult(
+                    error="tool_exception",
+                    message=str(e),
+                    retryable=is_retryable(e)
+                )
+
+IS-DONE CHECKER
+--------------------------------------------------------------------------------
+
+The completion checker is a separate small LLM call. Never rely on the model's
+own assessment of completion as the sole signal.
+
+    IsDoneInput:
+        task_text: str
+        last_assistant_message: str
+        git_diff_summary: str
+        changed_files: list[str]
+        test_status: str
+        lint_status: str
+        recent_tool_calls: list[ToolCallSummary]
+
+    IsDoneOutput:
+        is_done: bool
+        confidence: "low" | "medium" | "high"
+        reason: str
+        missing_steps: list[str]
+
+    Model: fast/cheap model (haiku, flash)
+    Temperature: 0.0
+    Max retries: 2
+
+Fallback (if checker repeatedly fails or errors):
+    Heuristic: files changed AND (tests run OR tests explained) AND no fatal errors
+               AND diff exists -> assume done
+
+NUDGE TEMPLATE
+--------------------------------------------------------------------------------
+
+    <system-nudge>
+    You stopped without enough evidence the task is complete.
+
+    Missing: {missing_steps}
+    Reason: {reason}
+
+    Review the task requirements, inspect the current diff with git_diff,
+    run or explain the relevant tests, and continue unless the task is
+    genuinely complete. Do not stop just because you wrote code — stop
+    when you have evidence the task works.
+    </system-nudge>
+
+AUTO-TOOLS
+--------------------------------------------------------------------------------
+
+Auto-tools run deterministically before the first LLM call in a subsession.
+They fill in obvious context so the model doesn't waste turns on it.
+
+    - read_repo_instructions: AGENTS.md, CLAUDE.md, .cursor/rules
+    - generate_repo_map: tree-sitter structural overview
+    - inspect_package_manager: list deps, find test/build commands
+    - identify_test_commands: from package.json scripts, Makefile, pytest.ini
+    - get_linked_issue: if task has issue URL, fetch full issue text
+    - get_relevant_docs: top-3 doc snippets from docs_search(task_text)
+
+Results are injected as a "tool context" message before the first user message.

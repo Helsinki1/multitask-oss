@@ -1,0 +1,101 @@
+================================================================================
+INTEGRATING OPENCLAW PRINCIPLES/IDEAS — HOW OPENCLAW MAPS INTO THIS SYSTEM
+================================================================================
+
+OpenClaw's architecture describes a general-purpose conversational agent system.
+This document explains how each OpenClaw concept maps into this coding agent.
+
+OPENCLAW COMPONENT → THIS SYSTEM
+--------------------------------------------------------------------------------
+
+CHANNEL ADAPTERS (OpenClaw: one per platform, Baileys/grammY)
+→ Identical concept. We adopt it directly.
+  Our adapters: CLI, Web, Slack, GitHub events, Telegram, WhatsApp.
+  Each normalizes to InboundMessage. Agent runtime is channel-agnostic.
+
+SESSION MANAGER (OpenClaw: resolves who's talking and in what context)
+→ Adopted directly.
+  For conversational turns (non-task): DM collapses to one main session per user.
+  For coding tasks: each task gets its own isolated session with its own
+  sandbox, branch, and context files.
+  Critical: without proper session isolation, two users' tasks share context
+  and clobber each other's state.
+
+QUEUE (OpenClaw: serializes runs per session)
+→ Adopted directly.
+  Agent turns take seconds to minutes. The queue holds new messages while a
+  run is active and either injects them as mid-run user input or queues them
+  for the next turn. This prevents race conditions and undefined behavior.
+
+AGENT RUNTIME (OpenClaw: assembles context, runs agent loop)
+→ Extended significantly.
+  OpenClaw's runtime: call model → execute tools → feed results → repeat.
+  Our runtime: executes the full devloop blueprint (20 deterministic + LLM
+  nodes). The LLM implementation subsession is OpenClaw's loop — but it is
+  just one node in a larger deterministic pipeline.
+
+CONTEXT FILES (OpenClaw: AGENTS.md, SOUL.md, TOOLS.md, MEMORY.md, daily log)
+→ Adopted and extended.
+  We keep the Markdown file convention for session-level persistent context.
+  Files per session/sandbox:
+    AGENTS.md   — agent capabilities, available tools, how to use them
+    SOUL.md     — agent persona and communication style
+    TOOLS.md    — detailed tool documentation for this run
+    MEMORY.md   — index of persistent knowledge about user/project
+    DAILY.md    — running log of today's events
+    HISTORY.md  — compressed conversation history
+  For coding tasks, we add:
+    TASK.md     — current task, context bundle, repo rules
+    TRACE.md    — live append-only trace log for the current run
+
+CONTROL PLANE (OpenClaw: WebSocket API on port 18789)
+→ Adopted directly.
+  Single WebSocket server. All clients connect: CLI, web UI, mobile, 3D TUI.
+  Broadcasts: status changes, trace events, log lines, approval requests.
+  Accepts: cancellations, message injections, approval responses.
+  This is the nervous system that keeps all clients in sync without polling.
+
+WHAT OPENCLAW DOES NOT COVER (we add)
+--------------------------------------------------------------------------------
+
+Blueprint engine:
+    20-node deterministic pipeline. OpenClaw has no equivalent; it is a
+    conversational loop. We add node-level persistence, budget enforcement,
+    and deterministic validation.
+
+Sandbox isolation:
+    OpenClaw does not run code in isolated environments. We add Docker/VM
+    sandboxes, credential scoping, and network policies.
+
+Git + PR workflow:
+    OpenClaw does not open PRs. We add the full branch/PR lifecycle.
+
+Subagent system:
+    OpenClaw has one runtime. We add a subagent spawner, work queue,
+    planner/worker/reviewer pattern.
+
+Prompt loops:
+    OpenClaw has no first-class loop primitives. We add a PromptLoop entity
+    with trigger types, templates, and history.
+
+Eval platform:
+    OpenClaw has no eval system. We add fixture repos, golden tasks, scorers.
+
+HOW THE INTEGRATION WORKS AT RUNTIME
+--------------------------------------------------------------------------------
+
+1. Message arrives at a channel adapter.
+2. Normalizer produces InboundMessage.
+3. Session Manager resolves session_id and loads context files.
+4. Turn Queue serializes the turn.
+5. If message is a coding task:
+       Agent Runner creates a new task session, allocates sandbox.
+       Blueprint Engine runs the devloop.
+       Control plane broadcasts progress to all connected clients.
+6. If message is conversational (follow-up, status query):
+       Agent runtime handles it directly in the existing session context.
+       MEMORY.md and HISTORY.md are updated after the turn.
+7. Mid-run injection:
+       User sends message while blueprint is running.
+       Queue routes it to the running subsession as a pending_user_message.
+       DRAIN_USER_INPUT node processes it at the next safe checkpoint.

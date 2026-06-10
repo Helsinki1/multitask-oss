@@ -1,0 +1,169 @@
+================================================================================
+CONTROL PLANE — WEBSOCKET API
+================================================================================
+
+DESIGN
+--------------------------------------------------------------------------------
+
+Adapted from OpenClaw. A single WebSocket server that all clients connect to.
+All status updates, trace events, and interactive signals flow through it.
+
+Port: 18789 (configurable)
+Protocol: WebSocket + JSON messages
+
+The control plane is the nervous system of the agent platform. Any connected
+client — CLI, web browser, mobile app, 3D TUI — receives the same live stream
+of events and can send the same control signals.
+
+MESSAGE TYPES (server -> client)
+--------------------------------------------------------------------------------
+
+    TaskStatus:
+        type: "task.status"
+        task_id: str
+        status: str
+        current_node: str
+        elapsed_seconds: float
+        cost_usd: float
+
+    TraceEvent:
+        type: "trace.event"
+        task_id: str
+        event_type: str     # "node.started" | "tool.call" | "model.response" | etc.
+        node: str
+        message: str
+        severity: "debug" | "info" | "warning" | "error"
+        timestamp: str
+        metadata: dict
+
+    LogLine:
+        type: "log.line"
+        task_id: str
+        source: str         # "shell" | "agent" | "tool"
+        line: str
+        timestamp: str
+
+    ApprovalRequest:
+        type: "approval.request"
+        approval_id: str
+        task_id: str
+        tool_name: str
+        arguments: dict
+        reason: str
+        expires_at: str
+
+    TaskCompleted:
+        type: "task.completed"
+        task_id: str
+        status: str         # terminal status
+        pr_url: str | null
+        branch_url: str | null
+        summary: str
+        cost_usd: float
+        duration_seconds: float
+
+MESSAGE TYPES (client -> server)
+--------------------------------------------------------------------------------
+
+    Subscribe:
+        type: "subscribe"
+        task_ids: list[str]     # subscribe to specific task streams
+        user_id: str
+        auth_token: str
+
+    CancelTask:
+        type: "task.cancel"
+        task_id: str
+
+    InjectMessage:
+        type: "task.inject"
+        task_id: str
+        content: str        # message to inject into running subsession
+
+    ApprovalResponse:
+        type: "approval.respond"
+        approval_id: str
+        approved: bool
+        reason: str | null
+
+SERVER IMPLEMENTATION
+--------------------------------------------------------------------------------
+
+    class ControlPlane:
+        def __init__(self):
+            self.connections: dict[str, WebSocketConnection] = {}
+            self.subscriptions: dict[str, set[str]] = {}  # task_id -> user_ids
+
+        async def handle_connection(self, ws):
+            user_id = await self.authenticate(ws)
+            self.connections[user_id] = ws
+            async for message in ws:
+                await self.handle_message(user_id, message)
+
+        async def broadcast_event(self, task_id: str, event: dict):
+            subscribers = self.subscriptions.get(task_id, set())
+            for user_id in subscribers:
+                conn = self.connections.get(user_id)
+                if conn:
+                    await conn.send(json.dumps(event))
+
+        async def broadcast_to_user(self, user_id: str, event: dict):
+            conn = self.connections.get(user_id)
+            if conn:
+                await conn.send(json.dumps(event))
+
+CANCELLATION FLOW
+--------------------------------------------------------------------------------
+
+    1. Client sends CancelTask { task_id }
+    2. Control plane writes cancellation flag to DB: cancellation_requested[task_id] = True
+    3. Blueprint engine checks flag at start of each node and before each model/tool call
+    4. On detection: current node finishes cleanup, state is saved, task marked "cancelled"
+    5. Control plane broadcasts TaskCompleted { status: "cancelled" }
+
+MESSAGE INJECTION FLOW
+--------------------------------------------------------------------------------
+
+    1. Client sends InjectMessage { task_id, content }
+    2. Control plane appends to pending_user_messages in task DB
+    3. Blueprint engine reads pending_user_messages at DRAIN_USER_INPUT checkpoint
+    4. DRAIN_USER_INPUT LLM subsession incorporates user feedback
+    5. Blueprint continues from GATHER_CHANGED_FILES
+
+AUTHENTICATION
+--------------------------------------------------------------------------------
+
+WebSocket connections authenticate via:
+    - JWT in the initial HTTP upgrade request (Authorization header)
+    - Session token from web UI login
+
+Users can only subscribe to tasks they own.
+Users can only cancel or inject messages to their own tasks.
+Admins can subscribe to all tasks (for monitoring).
+
+CLI ADAPTER INTEGRATION
+--------------------------------------------------------------------------------
+
+The CLI adapter connects to the control plane as a WebSocket client.
+All local terminal output is driven by events from the control plane.
+This means the CLI works even for tasks submitted via other channels.
+
+    # CLI command: submit a task and watch it
+    > agent run "fix the null handling in invoice export"
+
+    [connecting to control plane at ws://localhost:18789]
+    [task created: task_abc123]
+    [01/20] checking branch... done (main -> agent/task_abc123-fix-null)
+    [02/20] loading task... done
+    [03/20] preparing context... done (repo map generated, 3 docs fetched)
+    [04/20] implementing... (turn 1/100, cost $0.03)
+      > tool: search_repo("invoice")
+      > tool: read_file("src/billing/invoice.py", 40, 80)
+      > tool: apply_patch(...)
+      > tool: run_tests("pytest tests/billing/ -x")
+    [04/20] implementing... DONE (15 turns, $0.18)
+    [05/20] checkpoint commit... done
+    ...
+    [16/20] PR created: https://github.com/org/repo/pull/1234
+    [19/20] notified
+    [DONE] PR: https://github.com/org/repo/pull/1234 | Cost: $0.24 | Time: 4m12s

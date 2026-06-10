@@ -1,0 +1,169 @@
+================================================================================
+MODEL GATEWAY
+================================================================================
+
+PURPOSE
+--------------------------------------------------------------------------------
+
+A model gateway is the single choke point through which all model calls flow.
+It provides: unified API, routing, logging, spend tracking, rate limits, retry.
+
+For MVP: direct Anthropic/OpenAI SDK is fine.
+For v2+: a gateway is worth the investment.
+
+MINIMAL GATEWAY INTERFACE
+--------------------------------------------------------------------------------
+
+    POST /chat/completions
+        Request:
+            model: str
+            messages: list[Message]
+            tools: list[ToolSpec] | null
+            temperature: float
+            max_tokens: int
+            stream: bool
+            metadata:
+                task_id: str
+                session_id: str
+                node_name: str
+                user_id: str
+                repo_name: str
+                prompt_version: str
+
+        Response:
+            assistant_message: Message
+            tool_calls: list[ToolCall] | null
+            usage:
+                prompt_tokens: int
+                completion_tokens: int
+                cost_usd: float
+            provider: str
+            model: str
+            latency_ms: int
+            request_id: str
+
+ROUTING POLICY
+--------------------------------------------------------------------------------
+
+Use the strongest coding model for work that requires it.
+Use cheaper models for classification and summarization.
+
+    Node / use case               Recommended model
+    ─────────────────────────────────────────────────────
+    IMPLEMENT_TASK                claude-opus-4-8 (best coding)
+    FIX_CI_FAILURES               claude-opus-4-8
+    RUN_RELATED_TESTS             claude-sonnet-4-6
+    FIX_LINT_FAILURES             claude-sonnet-4-6
+    DECOMPOSE_TASK (planner)      claude-sonnet-4-6
+    REVIEW_DIFF (reviewer)        claude-sonnet-4-6
+    GENERATE_PR_DESCRIPTION       claude-haiku-4-5
+    IS_DONE check                 claude-haiku-4-5
+    PUBLIC_REPO_REVIEW            claude-sonnet-4-6 (at temp 0.0)
+    Summary generation            claude-haiku-4-5
+    Classification calls          claude-haiku-4-5
+    ─────────────────────────────────────────────────────
+
+Temperature policy:
+    implementation (IMPLEMENT_TASK, FIX_CI): 0.1-0.3
+    analysis/planning: 0.2-0.4
+    PR descriptions: 0.3-0.5
+    safety review: 0.0
+    is_done checks: 0.0
+
+FALLBACK POLICY
+--------------------------------------------------------------------------------
+
+Do not silently downgrade mid-implementation. Bad policy:
+    "If opus is rate-limited, use sonnet."
+This breaks context coherence in the middle of a complex coding subsession.
+
+Better policy:
+    - Transient error (429, 500): retry same model up to 3x with exponential backoff
+    - Extended outage: pause task, notify user, allow manual retry
+    - Downgrade only for non-implementation calls (is_done, summaries, PR descriptions)
+    - Always record model used in trace
+
+SPEND TRACKING
+--------------------------------------------------------------------------------
+
+Every model_calls row stores:
+    task_id, user_id, model, prompt_tokens, completion_tokens, cost_usd, latency_ms
+
+Rollups:
+    per-task cost (sum of model_calls + tool compute)
+    per-user daily cost
+    per-team daily cost
+    per-repo cost
+
+Alerts:
+    Task exceeds $5: notify user at task end
+    Task exceeds $10: interrupt and require confirmation to continue
+    User exceeds daily budget: queue tasks until next day
+
+RATE LIMITS
+--------------------------------------------------------------------------------
+
+At gateway level:
+    Per-task:       max_tokens_per_minute = 50k
+    Per-user:       max_concurrent_model_calls = 2
+    Per-team:       max_concurrent_model_calls = 10
+
+Model provider rate limits:
+    Gateway tracks token usage per minute per model
+    Backs off requests to stay within provider limits
+    Distributes requests across providers if multiple are configured
+
+CONTEXT CACHING
+--------------------------------------------------------------------------------
+
+Use prompt caching where available (Anthropic extended thinking, cache_control).
+
+    Cache: system prompt + context bundle (stable across turns in a subsession)
+    Don't cache: the conversation history (changes every turn)
+
+Caching significantly reduces cost for long subsessions.
+
+STREAMING
+--------------------------------------------------------------------------------
+
+Stream model responses to the control plane for live UI updates.
+
+    gateway -> async generator of chunks ->
+    blueprint engine ->
+    trace event stream ->
+    control plane WebSocket ->
+    web UI / CLI (display partial output as it arrives)
+
+The model's partial text output is buffered and displayed in real time.
+Tool calls are detected when the full tool_call object is complete.
+
+REDACTION AT GATEWAY
+--------------------------------------------------------------------------------
+
+Before logging request/response:
+    - Redact known secret patterns from messages
+    - Redact GITHUB_TOKEN, API keys, password-like strings
+    - Store redacted versions in model_calls table
+    - Store full (unredacted) in encrypted artifact if needed for debugging
+
+LITELLM AS GATEWAY BACKEND (recommended for v1)
+--------------------------------------------------------------------------------
+
+LiteLLM provides a unified interface to 100+ model providers.
+It handles: routing, retry, logging, cost tracking.
+Can be self-hosted as a proxy server.
+
+    from litellm import completion
+
+    response = completion(
+        model="claude-opus-4-8",
+        messages=messages,
+        metadata={"task_id": task_id},
+    )
+
+For v2: run LiteLLM as a separate service with:
+    - Per-key spend limits
+    - Request logging to Postgres
+    - Model routing rules in config
+
+For v1: use LiteLLM as a library directly in the agent runner.

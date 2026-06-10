@@ -1,0 +1,146 @@
+================================================================================
+TOOL SYSTEM — REGISTRY DESIGN
+================================================================================
+
+TOOL SPEC SCHEMA
+--------------------------------------------------------------------------------
+
+Every tool in the registry must have:
+
+    ToolSpec:
+        id: str
+        name: str
+        short_description: str          # shown in tool list to model
+        full_description: str           # shown in tool call descriptions
+        params_schema: JSONSchema        # input parameter schema
+        output_schema: JSONSchema | null # structured output (if applicable)
+        sensitivity: enum               # "low" | "medium" | "high" | "destructive"
+        requires_human_confirmation: bool
+        allowed_environments: list[str] # ["sandbox", "local", "production"]
+        allowed_roles: list[str]        # ["worker", "reviewer", "integration"]
+        timeout_seconds: int
+        max_output_bytes: int           # truncate beyond this
+        implementation: callable | MCP endpoint
+        examples: list[ToolExample]     # shown in tool description
+
+    ToolExample:
+        description: str
+        call: dict
+        result_summary: str
+
+TOOLSETS
+--------------------------------------------------------------------------------
+
+Tools are grouped into named sets. Nodes receive a specific toolset.
+
+    "dev" toolset (IMPLEMENT_TASK, FIX_LINT, RUN_TESTS, FIX_CI):
+        read_file, write_file, apply_patch, replace_in_file
+        list_files, search_repo, code_search, get_repo_map
+        run_shell, run_tests
+        git_status, git_diff, git_log
+        docs_search, issue_read, package_manager_info
+
+    "readonly" toolset (REVIEWER agent, PUBLIC_REPO_REVIEW):
+        read_file, list_files, search_repo, code_search, get_repo_map
+        git_diff, git_log, git_status
+        docs_search, issue_read
+
+    "discovery" toolset (added to IMPLEMENT_TASK in v2):
+        web_search, docs_search, code_search
+        local_server_start, local_server_stop, local_server_request
+        browser_open, browser_screenshot, browser_click, browser_type
+        vlm_describe_screenshot
+
+    "integration" toolset (INTEGRATION agent, PR creation):
+        dev toolset
+        git_merge, git_cherry_pick
+        github_create_pr, github_update_pr
+        github_create_issue, github_post_comment
+
+    "admin" toolset (not available to model; used by deterministic nodes only):
+        git_push, github_set_pr_draft, sandbox_create, sandbox_destroy
+
+TOOL REGISTRY IMPLEMENTATION
+--------------------------------------------------------------------------------
+
+    class ToolRegistry:
+        def __init__(self):
+            self._tools: dict[str, ToolSpec] = {}
+            self._toolsets: dict[str, list[str]] = {}
+
+        def register(self, spec: ToolSpec):
+            self._tools[spec.name] = spec
+
+        def toolset(self, name: str) -> list[ToolSpec]:
+            return [self._tools[t] for t in self._toolsets[name]]
+
+        def get(self, name: str) -> ToolSpec | None:
+            return self._tools.get(name)
+
+        def for_model(self, toolset_name: str) -> list[dict]:
+            # Returns tool list in model API format
+            return [tool_to_model_format(t) for t in self.toolset(toolset_name)]
+
+MCP COMPATIBILITY
+--------------------------------------------------------------------------------
+
+The tool registry is MCP-compatible. MCP tools can be mounted as external
+endpoints with:
+    name: prefixed with mcp/{server_name}/
+    implementation: HTTP call to MCP server
+    schema: derived from MCP tool definition
+
+This allows external MCP servers (e.g. GitHub MCP, filesystem MCP) to be
+consumed as native tools.
+
+TOOL DESCRIPTION RULES
+--------------------------------------------------------------------------------
+
+Good tool descriptions (the model reads these to decide when to use the tool):
+    - State the primary use case in the first sentence
+    - Explain what the output contains (not just what the tool does)
+    - Note important limits (max output, line limits, etc.)
+    - Include 1-2 concrete examples in the examples list
+    - Say when NOT to use it (e.g. "use search_repo for broad search; use
+      read_file only when you know the exact path")
+
+Bad:
+    - "Reads a file" (too vague — what does the output look like?)
+    - "Use this tool to read files from the repository" (circular)
+    - 500-word descriptions (degrades tool selection)
+
+TOOL TESTS
+--------------------------------------------------------------------------------
+
+Every tool requires tests:
+    - Schema validation test (invalid args rejected)
+    - Permission test (tool blocked in wrong environment)
+    - Approval test (requires_human_confirmation blocks without approval)
+    - Success path test
+    - Failure path test (command fails, file not found, etc.)
+    - Output truncation test (output > max_output_bytes is truncated correctly)
+    - Audit log test (call is recorded in tool_calls table)
+    - Prompt-injection resilience test (if tool consumes external content)
+
+SENSITIVITY LEVELS
+--------------------------------------------------------------------------------
+
+    "low":
+        Read-only operations. No confirmation needed.
+        Examples: read_file, search_repo, git_diff, docs_search
+
+    "medium":
+        Mutations that are reversible (file writes, shell commands in sandbox).
+        No confirmation needed inside sandbox.
+        Examples: write_file, apply_patch, run_shell, run_tests
+
+    "high":
+        Mutations visible outside sandbox or with significant side effects.
+        Require approval outside sandbox.
+        Examples: github_post_comment, github_create_issue
+
+    "destructive":
+        Irreversible actions or actions with broad impact.
+        Always require human confirmation.
+        Examples: github_merge_pr, package_publish, production_deploy,
+                  delete_resources, rotate_credentials

@@ -1,0 +1,135 @@
+================================================================================
+MEMORY FILES — PERSISTENT CONTEXT IN MARKDOWN
+================================================================================
+
+DESIGN RATIONALE (from OpenClaw)
+--------------------------------------------------------------------------------
+
+Persistent context should be plain Markdown files, not database rows.
+Why:
+    - Human-readable: anyone can inspect and edit them
+    - Git-friendly: versioned, diffable, auditable
+    - Tool-friendly: the agent can read and update them with normal file tools
+    - Portable: they live in the sandbox with the code
+
+This is the OpenClaw pattern. We adopt it for session-level persistent context.
+
+FILE INVENTORY
+--------------------------------------------------------------------------------
+
+Per session directory (~/.agent/sessions/{session_id}/ for main sessions,
+/workspace/.agent/ for coding task sessions):
+
+    AGENTS.md
+        What this agent can do. Available tools. Capabilities.
+        Updated rarely — mostly static per deployment.
+
+    SOUL.md
+        Agent persona, communication style, preferences.
+        How the agent refers to itself, tone, level of detail.
+        Can be customized per user.
+
+    TOOLS.md
+        Detailed tool documentation for this session.
+        More verbose than the system prompt tool descriptions.
+        Includes examples, common patterns, gotchas.
+
+    MEMORY.md
+        Persistent knowledge index about the user and project.
+        Format: list of entries with date, category, and content.
+        Structure:
+            ## User Preferences
+            - 2026-06-01: User prefers compact diffs, no trailing summaries
+            - 2026-05-15: User works on the billing module primarily
+
+            ## Project Knowledge
+            - 2026-06-08: test_invoice_export is flaky — known issue, skip it
+            - 2026-06-01: deploy requires running `make db-migrate` first
+
+            ## Past Decisions
+            - 2026-05-20: chose approach A over B for the payment retry logic
+
+    DAILY.md
+        Running log of today's events. Appended to by the agent after each turn.
+        Format:
+            ## 2026-06-09
+            09:12 - Task task_abc: started "fix null handling in invoice export"
+            09:16 - Task task_abc: completed, PR #1234 created
+            10:45 - Task task_def: started "add rate limiting to API"
+
+    HISTORY.md
+        Compressed conversation history for long-running sessions.
+        Old conversation turns are summarized and moved here.
+        Format:
+            ## Summary as of 2026-06-08T18:00
+            User requested X. Agent implemented Y. PR #1220 merged.
+            User then asked about Z. Agent explained W.
+
+            ## Unsummarized (recent turns follow in main context)
+
+TASK CONTEXT FILES (inside sandbox)
+--------------------------------------------------------------------------------
+
+For each coding task, additional context files are created in /workspace/.agent/:
+
+    TASK.md
+        Current task description.
+        Repo rules and context bundle.
+        Linked issue content.
+        Auto-tools output.
+
+    TRACE.md
+        Live append-only trace log for this run.
+        Each node appends its status on completion.
+        Format:
+            [2026-06-09T09:12:03] Node 01 CHECK_FOR_CLEAN_BRANCH: OK
+            [2026-06-09T09:12:05] Node 02 LOAD_TASK: OK
+            [2026-06-09T09:12:08] Node 03 PREPARE_CONTEXT: OK (3 docs, repo map)
+            [2026-06-09T09:12:09] Node 04 IMPLEMENT_TASK: started (turn 0)
+            [2026-06-09T09:12:45] Node 04 IMPLEMENT_TASK: in progress (turn 8, $0.12)
+            [2026-06-09T09:15:02] Node 04 IMPLEMENT_TASK: done (15 turns, $0.18)
+            [2026-06-09T09:15:04] Node 05 CHECKPOINT_DEVELOPMENT: OK (commit abc1234)
+
+    PLAN.md (if planning agent was used)
+        The decomposed subtask plan from the planning agent.
+        Subtask statuses updated as workers complete.
+
+HOW THE AGENT READS AND UPDATES MEMORY
+--------------------------------------------------------------------------------
+
+Reading:
+    The session manager loads all memory files before each turn.
+    They are prepended to the context as a "memory context" block.
+    The agent always knows what it has remembered about the user.
+
+Writing:
+    The agent can update MEMORY.md using the write_file or replace_in_file tool.
+    When the agent learns something worth remembering, it appends to MEMORY.md.
+
+    System prompt instruction:
+        "If you learn something important about the user's preferences, project
+        conventions, or decisions that should be remembered for future sessions,
+        append it to /workspace/.agent/MEMORY.md in the format:
+        - {date}: {category}: {what you learned}"
+
+Daily log:
+    The agent appends to DAILY.md automatically after each turn.
+    This is not model-controlled — the runtime writes it deterministically.
+
+Conversation compression:
+    After 50+ turns in a session, the runtime runs a summarization pass:
+        - Takes the oldest 20 turns
+        - Calls a small cheap model to summarize them in 500 tokens
+        - Appends summary to HISTORY.md
+        - Removes the original turns from the live context
+
+MEMORY DECAY AND FRESHNESS
+--------------------------------------------------------------------------------
+
+Memory entries carry a date. The context pipeline weights recent entries higher.
+Entries older than 90 days are moved to an ARCHIVE section of MEMORY.md.
+
+The agent can also explicitly forget things:
+    "Remove the entry about test_invoice_export being flaky — that's been fixed."
+
+The agent locates the entry and removes it from MEMORY.md using normal file tools.

@@ -1,0 +1,340 @@
+================================================================================
+DEVLOOP — NODE SPECIFICATIONS
+================================================================================
+
+01 CHECK_FOR_CLEAN_BRANCH (Deterministic)
+--------------------------------------------------------------------------------
+Purpose: Verify workspace safety, capture initial commit SHA, set working branch.
+
+Actions:
+    git rev-parse HEAD
+    git branch --show-current
+    git status --porcelain
+    If on protected branch: create and checkout agent/{task_id}-{slug}
+
+Success -> 02 LOAD_TASK
+Failure -> END (git unavailable, repo missing, branch forbidden, dirty workspace)
+
+Notes:
+    Branch naming: agent/{task_id}-{slug} where slug is first 5 words of task.
+    Never put sensitive task text in branch name.
+    For large monorepos: use --porcelain=v1 with --untracked-files=no to reduce cost.
+
+02 LOAD_TASK (Deterministic)
+--------------------------------------------------------------------------------
+Purpose: Load, normalize, and wrap the user task. Detect repo visibility.
+
+Actions:
+    Read task from DB / file / issue URL / prompt
+    Fetch linked issue/PR context if URL provided
+    Detect repo visibility via git provider API (never trust model to decide)
+    If public repo: wrap task with stricter safety instructions
+    Store normalized task in trace
+
+Success -> 03 PREPARE_CONTEXT
+Failure -> END (task missing, repo not accessible, user not authorized)
+
+03 PREPARE_CONTEXT (Deterministic + optional retrieval)
+--------------------------------------------------------------------------------
+Purpose: Build context bundle for implementation subsession.
+
+Actions:
+    Read: README, CONTRIBUTING, AGENTS.md, CLAUDE.md, .cursor/rules
+    Inspect: package.json/pyproject.toml/go.mod — test commands, deps
+    Generate or retrieve: repo map (tree-sitter or cached)
+    Fetch: linked issue comments, docs search results
+    Get: code ownership metadata if available
+    Summarize: likely areas to inspect
+    Limit context size — give model tools to fetch more, not everything upfront
+
+Output: ContextBundle (see agent-state.txt)
+
+Success -> 04 IMPLEMENT_TASK
+Failure (degraded context) -> 04 IMPLEMENT_TASK with warning
+
+04 IMPLEMENT_TASK (LLM Subsession)
+--------------------------------------------------------------------------------
+Purpose: The main implementation loop. Model inspects, edits, runs commands.
+
+Tools available: dev toolset
+    read_file, write_file, apply_patch, replace_in_file,
+    search_repo, list_files, run_shell, run_tests,
+    git_diff, git_status, git_log,
+    get_repo_map, docs_search, code_search,
+    issue_read, package_manager_info
+
+System prompt layers:
+    base agent role + constraints
+    sandbox/environment context
+    tool usage instructions
+    repo rules from ContextBundle
+    safety instructions
+    implementation prompt with task + context
+
+Subsession loop:
+    call model -> if tool calls: execute -> append results -> continue
+    if no tool calls: run is_done_check
+    if not done: inject system nudge
+    stop on: is_done, budget_exhausted, cancellation, fatal error
+
+IsDoneCheck (structured output):
+    is_done: bool
+    confidence: "low" | "medium" | "high"
+    reason: str
+    missing_steps: list[str]
+    Inputs: task, last model message, git diff summary, changed files, tests run
+
+Nudge message (if not done):
+    "You stopped without enough evidence the task is complete. Review the task,
+    inspect the current diff, run or explain relevant tests, and continue unless
+    genuinely complete."
+
+Budgets: max_turns=100, max_wall_seconds=7200, max_cost_usd per task config
+
+Success -> 05 CHECKPOINT_DEVELOPMENT
+Failure (any) -> 05 CHECKPOINT_DEVELOPMENT (partial work still checkpointed)
+
+05 CHECKPOINT_DEVELOPMENT (Deterministic)
+--------------------------------------------------------------------------------
+Purpose: Commit implementation changes before deterministic steps mutate files.
+
+Actions:
+    git status
+    git add <changed files>
+    git commit -m "agent: implement requested change" (or "agent: checkpoint TASK-{id}")
+
+This separates model's edits from formatter/linter changes in history.
+
+Success -> 06 GATHER_CHANGED_FILES
+No changes + only_implement=True -> END (report: no changes made)
+Commit failure (nothing to commit) -> 06 GATHER_CHANGED_FILES (non-fatal)
+
+06 GATHER_CHANGED_FILES (Deterministic)
+--------------------------------------------------------------------------------
+Purpose: Compute changed files relative to merge base.
+
+Actions:
+    git merge-base origin/{base_branch} HEAD
+    git diff --name-only {merge_base}..HEAD
+    git diff --stat {merge_base}..HEAD
+
+Output: merge_base_sha, changed_files list
+
+Success -> 07 SETUP_WORKSPACE_HOOKS
+Failure -> END (git diff cannot be computed)
+
+07 SETUP_WORKSPACE_HOOKS (Deterministic)
+--------------------------------------------------------------------------------
+Purpose: Start background services needed for validation.
+
+Actions:
+    Based on changed_files, start: test databases, app servers, test containers
+    Run dependency install if package manifest changed
+    Start watchers or build daemons
+    Record hook handles for WAIT_FOR_BACKGROUND_HOOKS
+
+This is where warm sandboxes pay off — pre-installed deps skip this entirely.
+
+Success -> 08 LINT_AND_FORMAT
+Non-critical failure -> 08 LINT_AND_FORMAT (warning)
+
+08 LINT_AND_FORMAT (Deterministic + auto-fix)
+--------------------------------------------------------------------------------
+Purpose: Run language-appropriate formatters and linters on changed files.
+
+Selection logic:
+    *.py    -> ruff format, ruff check --fix, mypy, black
+    *.ts/tsx -> prettier, eslint --fix, tsc
+    *.go    -> gofmt, go vet, golangci-lint
+    *.rs    -> rustfmt, cargo clippy
+    *.rb    -> rubocop -A
+    docs    -> markdownlint
+
+Actions:
+    Run formatters (auto-fix in place)
+    Run linters (capture output)
+    If auto-fixed files: commit "agent: apply automated lint/format fixes"
+    Capture all outputs as artifacts
+
+Success (no unresolved failures) -> 10 POLICY_AND_SECRET_SCAN
+Unresolved failures -> 09 FIX_LINT_FAILURES
+
+09 FIX_LINT_FAILURES (LLM Subsession, optional)
+--------------------------------------------------------------------------------
+Purpose: Targeted fix for lint/typecheck failures the auto-fixer couldn't handle.
+
+Prompt: "The implementation produced the following lint/typecheck failures.
+Fix the source code, not the linter. Keep changes minimal. Re-run the relevant
+command and stop when it passes or when blocked."
+
+Inputs: lint output, changed files, task, diff
+Tools: same dev toolset as IMPLEMENT_TASK
+Max turns: 30
+Max wall: 600s
+
+Success -> 10 POLICY_AND_SECRET_SCAN
+Failure -> 10 POLICY_AND_SECRET_SCAN (record failure, continue)
+
+Policy: for internal draft PRs, lint failure doesn't block push.
+        For ready-for-review or public repo PRs, mark draft on lint failure.
+
+10 POLICY_AND_SECRET_SCAN (Deterministic)
+--------------------------------------------------------------------------------
+Purpose: Detect secrets, credentials, policy violations before any push.
+
+Scanners:
+    - gitleaks or trufflehog for secrets/credentials
+    - dependency/license scanner (license-checker, pip-licenses)
+    - internal-string scanner (custom: internal domains, hostnames)
+    - generated-file detector (files that shouldn't be committed)
+    - large-file detector (binaries, media, lock files)
+    - forbidden API scanner (production DB URLs, admin endpoints)
+
+Severity:
+    HIGH: secret found -> END before push, notify user
+    MEDIUM: policy warning -> mark PR draft, continue
+    LOW: annotation only, continue
+
+Success -> 11 PUBLIC_REPO_REVIEW (if public) or 12 RUN_RELATED_TESTS
+
+11 PUBLIC_REPO_REVIEW (Deterministic gate + LLM reviewer)
+--------------------------------------------------------------------------------
+Purpose: Prevent accidental leakage to public repos.
+Only runs when is_public_repo=True.
+
+Actions:
+    Deterministic: run secret scanner on full diff
+    Deterministic: run internal-domain/hostname scanner
+    LLM call (no tools): review full diff for confidential content
+        Structured output: { result: "PASS" | "FAIL", violations: list[str] }
+        Prompt: "Review this diff for credentials, private URLs, internal
+        hostnames, customer data, account IDs, or org-confidential content."
+        Temperature: 0.0
+
+PASS and no scanner violations -> 12 RUN_RELATED_TESTS
+Any FAIL -> END (do not push), tell user: "Branch is local. Review manually."
+
+12 RUN_RELATED_TESTS (LLM Subsession, optional)
+--------------------------------------------------------------------------------
+Purpose: Agent selects and runs relevant tests for the diff.
+
+Prompt: "Analyze the diff and changed files. Identify the most relevant tests.
+Run at most {max_tests} test commands. If tests fail due to source-code bugs
+introduced by this branch, fix source code, not tests. Re-run to confirm."
+
+Inputs: full diff (or artifact ref), changed files, repo map, test configs
+Tools: dev toolset
+Max turns: 50, max wall: 3600s, max related tests: 30
+Retry per failing test: 2-3
+
+Success -> 13 PUSH_BRANCH
+Test failure -> 13 PUSH_BRANCH (draft PR, failure recorded)
+
+13 PUSH_BRANCH (Deterministic)
+--------------------------------------------------------------------------------
+Purpose: Push working branch to remote.
+
+Checks before push:
+    working_branch not in PROTECTED_BRANCHES
+    policy_status passed (or low-severity only)
+    allow_push is True
+    if public: allow_public_push is True (set after node 11 PASS)
+
+Action: git push origin HEAD:refs/heads/{working_branch}
+
+Success -> 14 WAIT_FOR_BACKGROUND_HOOKS
+Failure -> 19 FINALIZE_AND_NOTIFY (branch-only, no PR)
+
+14 WAIT_FOR_BACKGROUND_HOOKS (Deterministic)
+--------------------------------------------------------------------------------
+Purpose: Join async setup/lint/service hooks started in node 07.
+
+Actions: wait for hook handles, kill timed-out hooks, collect logs
+Logs attached to trace as artifacts.
+
+Success -> 15 GENERATE_PR_DESCRIPTION
+Non-critical hook failure -> 15 with warning
+
+15 GENERATE_PR_DESCRIPTION (LLM single call)
+--------------------------------------------------------------------------------
+Purpose: Generate PR title and body grounded in actual trace data.
+
+Prompt grounded in: task text, diff summary, changed files, commits,
+validation results, known failures, test commands and results.
+
+Required output:
+    title: str (concise, accurate, e.g. "Fix null handling in invoice export")
+    body:
+        ## Summary
+        ## Changes
+        ## Validation (actual commands and results — no invented results)
+        ## Risks / Notes
+        ## Known Issues (if any)
+        Link to trace page
+
+Temperature: 0.3
+
+Do not claim tests passed unless they appear in validation evidence.
+
+16 CREATE_OR_UPDATE_PR (Deterministic)
+--------------------------------------------------------------------------------
+Purpose: Create or update the pull request via GitHub API.
+
+Actions:
+    Call GitHub API: create PR or update if already exists
+    Set draft=True if any validation failures exist
+    Add labels: "agent-created", validation status
+    Assign reviewers from CODEOWNERS if policy allows
+    Attach trace/log URL in PR body footer
+
+Success -> 17 POLL_CI (if run_ci_loop) else 19 FINALIZE_AND_NOTIFY
+Failure -> 19 FINALIZE_AND_NOTIFY with branch URL + manual instructions
+
+17 POLL_CI (Deterministic)
+--------------------------------------------------------------------------------
+Purpose: Watch CI status after PR creation.
+
+Actions:
+    Poll commit check status every 60s
+    Fetch failed job logs (up to 50KB per job)
+    Classify failures: branch-related vs baseline/flaky
+    Stop on CI pass or timeout (max: 30 min poll)
+    Stop if FIX_CI_FAILURES budget exhausted
+
+CI passes -> END
+CI fails + retry budget remains -> 18 FIX_CI_FAILURES
+
+18 FIX_CI_FAILURES (LLM Subsession, optional)
+--------------------------------------------------------------------------------
+Purpose: Bounded attempts to fix CI failures.
+
+Prompt: "CI failed. Analyze the logs. Determine if the failure was introduced
+by this branch. If yes, make a minimal source-code fix and run a local
+reproduction. If no, record why it appears unrelated/flaky."
+
+Max fix loops: 3 (from budgets.max_ci_fix_loops)
+Stop if: same failure repeats, changes growing without progress, budget exceeded
+
+On fix: return to 08 LINT_AND_FORMAT or directly to 13 PUSH_BRANCH
+
+19 FINALIZE_AND_NOTIFY (Deterministic)
+--------------------------------------------------------------------------------
+Purpose: Produce final result, notify user.
+
+Final report:
+    task summary
+    branch/PR URL
+    changed files
+    validation results (with commands and exit codes)
+    known issues
+    next recommended human action
+    trace/log page link
+    total cost and duration
+
+Notify via:
+    Channel adapter that submitted the task (Slack, Telegram, CLI, web)
+    WebSocket control plane broadcast
+
+20 END (Terminal)
+--------------------------------------------------------------------------------
+Mark task status. Persist final state. Release sandbox (or retain per policy).
