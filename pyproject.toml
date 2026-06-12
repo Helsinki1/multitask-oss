@@ -3,7 +3,7 @@ name = "cloud-agent"
 version = "0.1.0"
 requires-python = ">=3.11"
 dependencies = [
-    "anthropic>=0.40",
+    "openai>=1.0",
     "pydantic>=2.0",
     "python-dotenv>=1.0",
 ]
@@ -15,7 +15,7 @@ dev = ["pytest", "ruff", "mypy"]
 cloud-agent = "cloud_agent.cli:main"
 
 [build-system]
-requires = ["setuptools>=42"]
+requires = ["setuptools>=64"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]

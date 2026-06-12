@@ -24,8 +24,8 @@ def main() -> None:
     parser.add_argument("--model", default=None, help="Override implement model")
     args = parser.parse_args()
 
-    if not settings.anthropic_api_key:
-        print("Error: ANTHROPIC_API_KEY not set", file=sys.stderr)
+    if not settings.openai_api_key:
+        print("Error: OPENAI_API_KEY not set", file=sys.stderr)
         sys.exit(1)
 
     repo_path = os.path.realpath(args.repo)

@@ -11,14 +11,14 @@ class BudgetExhausted(Exception):
 
 # Approximate cost per million tokens (USD)
 _COST_PER_M_INPUT: dict[str, float] = {
-    "claude-opus-4-8": 15.0,
-    "claude-sonnet-4-6": 3.0,
-    "claude-haiku-4-5-20251001": 0.8,
+    "gpt-4o": 75.0,
+    "gpt-4o": 2.5,
+    "gpt-4o-mini": 0.15,
 }
 _COST_PER_M_OUTPUT: dict[str, float] = {
-    "claude-opus-4-8": 75.0,
-    "claude-sonnet-4-6": 15.0,
-    "claude-haiku-4-5-20251001": 4.0,
+    "gpt-4o": 150.0,
+    "gpt-4o": 10.0,
+    "gpt-4o-mini": 0.6,
 }
 
 

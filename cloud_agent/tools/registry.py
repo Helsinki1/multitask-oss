@@ -1,4 +1,4 @@
-"""Tool registry: maps tool names to callables and Anthropic schema definitions."""
+"""Tool registry: maps tool names to callables and OpenAI schema definitions."""
 
 from __future__ import annotations
 
@@ -25,12 +25,15 @@ class ToolRegistry:
     def get(self, name: str) -> ToolSpec | None:
         return self._tools.get(name)
 
-    def to_anthropic_schema(self) -> list[dict]:
+    def to_openai_schema(self) -> list[dict]:
         return [
             {
-                "name": t.name,
-                "description": t.description,
-                "input_schema": t.input_schema,
+                "type": "function",
+                "function": {
+                    "name": t.name,
+                    "description": t.description,
+                    "parameters": t.input_schema,
+                },
             }
             for t in self._tools.values()
         ]

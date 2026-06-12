@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import json
 import time
 from dataclasses import dataclass, field
 
-import anthropic
+import openai
 
 from cloud_agent.agent.budgets import BudgetExhausted, check_budget, estimate_cost
 from cloud_agent.agent.completion_checker import IsDoneOutput, check_is_done
@@ -44,15 +45,17 @@ def run_subsession(
     tracer: Tracer,
 ) -> tuple[SubsessionResult, AgentState]:
     """Run one LLM subsession. Returns (result, updated_state)."""
-    client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
+    client = openai.OpenAI(api_key=settings.openai_api_key)
 
-    messages: list[dict] = [{"role": "user", "content": config.initial_human_message}]
+    messages: list[dict] = [
+        {"role": "system", "content": config.system_prompt},
+        {"role": "user", "content": config.initial_human_message},
+    ]
     start_time = time.time()
     total_cost = 0.0
     last_text = ""
 
     for turn in range(config.max_turns):
-        # Wall-time budget check
         elapsed = time.time() - start_time
         if elapsed > config.max_wall_seconds:
             tracer.emit("task.budget_exhausted", {"reason": "wall time"})
@@ -64,7 +67,6 @@ def run_subsession(
                 total_cost_usd=total_cost,
             ), state
 
-        # Other budget checks
         try:
             check_budget(state)
         except BudgetExhausted as exc:
@@ -77,19 +79,17 @@ def run_subsession(
                 total_cost_usd=total_cost,
             ), state
 
-        # Call the model
         api_kwargs: dict = dict(
             model=config.model,
             max_tokens=config.max_tokens,
-            system=config.system_prompt,
             messages=messages,
         )
         if config.tools_schema:
             api_kwargs["tools"] = config.tools_schema
 
         try:
-            response = client.messages.create(**api_kwargs)
-        except anthropic.APIError as exc:
+            response = client.chat.completions.create(**api_kwargs)
+        except openai.APIError as exc:
             tracer.emit("model_error", {"error": str(exc), "turn": turn})
             return SubsessionResult(
                 status="error",
@@ -99,12 +99,13 @@ def run_subsession(
                 total_cost_usd=total_cost,
             ), state
 
-        # Track usage
-        cost = estimate_cost(
-            config.model,
-            response.usage.input_tokens,
-            response.usage.output_tokens,
-        )
+        choice = response.choices[0]
+        msg = choice.message
+        finish_reason = choice.finish_reason
+
+        input_tokens = response.usage.prompt_tokens
+        output_tokens = response.usage.completion_tokens
+        cost = estimate_cost(config.model, input_tokens, output_tokens)
         total_cost += cost
         state = state.apply_update({
             "budgets": state.budgets.copy_with(
@@ -116,53 +117,46 @@ def run_subsession(
         tracer.emit("model_response", {
             "turn": turn,
             "model": config.model,
-            "input_tokens": response.usage.input_tokens,
-            "output_tokens": response.usage.output_tokens,
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
             "cost_usd": cost,
-            "stop_reason": response.stop_reason,
+            "stop_reason": finish_reason,
         })
 
-        # Parse content blocks
-        tool_uses = [b for b in response.content if b.type == "tool_use"]
-        text_blocks = [b for b in response.content if b.type == "text"]
-        last_text = text_blocks[-1].text if text_blocks else last_text
+        last_text = msg.content or last_text
 
-        # Serialize assistant message for history
-        assistant_content = []
-        for block in response.content:
-            if block.type == "text":
-                assistant_content.append({"type": "text", "text": block.text})
-            elif block.type == "tool_use":
-                assistant_content.append({
-                    "type": "tool_use",
-                    "id": block.id,
-                    "name": block.name,
-                    "input": block.input,
-                })
-        messages.append({"role": "assistant", "content": assistant_content})
+        # Serialize assistant message into conversation history
+        assistant_msg: dict = {"role": "assistant", "content": msg.content}
+        if msg.tool_calls:
+            assistant_msg["tool_calls"] = [
+                {
+                    "id": tc.id,
+                    "type": "function",
+                    "function": {"name": tc.function.name, "arguments": tc.function.arguments},
+                }
+                for tc in msg.tool_calls
+            ]
+        messages.append(assistant_msg)
 
-        if tool_uses:
-            # Execute tools and collect results
-            tool_results: list[dict] = []
-            for tu in tool_uses:
-                result_str = registry.execute(tu.name, tu.input, state.workspace_path)
+        if finish_reason == "tool_calls" and msg.tool_calls:
+            for tc in msg.tool_calls:
+                args = json.loads(tc.function.arguments)
+                result_str = registry.execute(tc.function.name, args, state.workspace_path)
                 state = state.apply_update({
                     "budgets": state.budgets.copy_with(
                         used_tool_calls=state.budgets.used_tool_calls + 1,
                     )
                 })
                 tracer.emit("tool_call", {
-                    "name": tu.name,
+                    "name": tc.function.name,
                     "result_preview": result_str[:200],
                 })
-                tool_results.append({
-                    "type": "tool_result",
-                    "tool_use_id": tu.id,
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": tc.id,
                     "content": result_str,
                 })
-            messages.append({"role": "user", "content": tool_results})
         else:
-            # No tool calls — check completion
             done: IsDoneOutput = check_is_done(
                 task_text=state.task_text,
                 last_assistant_message=last_text,
@@ -184,11 +178,9 @@ def run_subsession(
                     total_cost_usd=total_cost,
                 ), state
 
-            # Not done — inject nudge and continue
             nudge = build_nudge(done.missing_steps, done.reason)
             messages.append({"role": "user", "content": nudge})
 
-    # Hit max_turns
     return SubsessionResult(
         status="budget_exhausted",
         messages=messages,

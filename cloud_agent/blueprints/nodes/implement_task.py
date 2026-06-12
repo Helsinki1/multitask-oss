@@ -29,7 +29,7 @@ class ImplementTaskNode(Node):
             system_prompt=build_implement_system(state, state.context_bundle),
             initial_human_message=build_implement_human(state),
             model=settings.implement_model,
-            tools_schema=registry.to_anthropic_schema(),
+            tools_schema=registry.to_openai_schema(),
             max_turns=state.budgets.max_llm_turns,
             max_wall_seconds=state.budgets.max_wall_seconds,
             max_tokens=8192,

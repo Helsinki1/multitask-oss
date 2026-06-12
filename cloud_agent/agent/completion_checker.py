@@ -1,11 +1,12 @@
-"""IsDoneChecker: structured completion check via a small Anthropic call."""
+"""IsDoneChecker: structured completion check via a small OpenAI call."""
 
 from __future__ import annotations
 
+import json
 import subprocess
 from dataclasses import dataclass, field
 
-import anthropic
+import openai
 
 from cloud_agent.agent.prompts import IS_DONE_SYSTEM
 from cloud_agent.agent.state import AgentState
@@ -21,31 +22,34 @@ class IsDoneOutput:
 
 
 _CHECK_TOOL = {
-    "name": "check_completion",
-    "description": "Report whether the coding task is complete with structured evidence.",
-    "input_schema": {
-        "type": "object",
-        "properties": {
-            "is_done": {
-                "type": "boolean",
-                "description": "True only if there is concrete evidence the task is complete.",
+    "type": "function",
+    "function": {
+        "name": "check_completion",
+        "description": "Report whether the coding task is complete with structured evidence.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "is_done": {
+                    "type": "boolean",
+                    "description": "True only if there is concrete evidence the task is complete.",
+                },
+                "confidence": {
+                    "type": "string",
+                    "enum": ["low", "medium", "high"],
+                    "description": "Confidence level in the is_done assessment.",
+                },
+                "reason": {
+                    "type": "string",
+                    "description": "Brief explanation of why the task is or isn't complete.",
+                },
+                "missing_steps": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Steps still needed to complete the task (empty if done).",
+                },
             },
-            "confidence": {
-                "type": "string",
-                "enum": ["low", "medium", "high"],
-                "description": "Confidence level in the is_done assessment.",
-            },
-            "reason": {
-                "type": "string",
-                "description": "Brief explanation of why the task is or isn't complete.",
-            },
-            "missing_steps": {
-                "type": "array",
-                "items": {"type": "string"},
-                "description": "Steps still needed to complete the task (empty if done).",
-            },
+            "required": ["is_done", "confidence", "reason", "missing_steps"],
         },
-        "required": ["is_done", "confidence", "reason", "missing_steps"],
     },
 }
 
@@ -82,24 +86,24 @@ Lint status: {state.lint_status}
 
 Is the task complete? Call check_completion with your assessment."""
 
-    client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
+    client = openai.OpenAI(api_key=settings.openai_api_key)
 
     for attempt in range(max_retries + 1):
         try:
-            response = client.messages.create(
+            response = client.chat.completions.create(
                 model=settings.checker_model,
                 max_tokens=512,
                 temperature=0.0,
-                system=IS_DONE_SYSTEM,
-                messages=[{"role": "user", "content": user_msg}],
+                messages=[
+                    {"role": "system", "content": IS_DONE_SYSTEM},
+                    {"role": "user", "content": user_msg},
+                ],
                 tools=[_CHECK_TOOL],
-                tool_choice={"type": "tool", "name": "check_completion"},
+                tool_choice={"type": "function", "function": {"name": "check_completion"}},
             )
-            tool_block = next(
-                (b for b in response.content if b.type == "tool_use"), None
-            )
-            if tool_block:
-                inp = tool_block.input
+            msg = response.choices[0].message
+            if msg.tool_calls:
+                inp = json.loads(msg.tool_calls[0].function.arguments)
                 return IsDoneOutput(
                     is_done=bool(inp.get("is_done", False)),
                     confidence=inp.get("confidence", "low"),

@@ -1,0 +1,200 @@
+Example Trace Walkthrough
+=========================
+Command: python3 -m cloud_agent.cli --repo ./demo_repo --task "create a main.py file..."
+
+────────────────────────────────────────────────────────────────────────────────
+STEP 0 — cli.main() bootstraps the run
+────────────────────────────────────────────────────────────────────────────────
+cli.py::main() parses CLI flags (--repo, --task, --max-turns, --max-cost) and
+checks that OPENAI_API_KEY is present. It constructs an AgentState dataclass
+(state.py) with the workspace path, task text, and a BudgetState (max 100 turns,
+$5 cap), then creates a Tracer (writes JSONL events to traces/<session_id>.jsonl)
+and a StateStore (SQLite persistence). It prints the Task/Repo/Session/Trace/Model
+header block you see at the top of the output.
+
+────────────────────────────────────────────────────────────────────────────────
+STEP 1 — build_devloop() wires the node graph
+────────────────────────────────────────────────────────────────────────────────
+devloop.py::build_devloop() instantiates the five pipeline nodes
+(CheckBranchNode, LoadTaskNode, PrepareContextNode, ImplementTaskNode,
+CheckpointNode) plus a terminal EndNode, and wraps them in a BlueprintEngine.
+The engine holds references to the Tracer and StateStore so every node transition
+is observable and durable.
+
+────────────────────────────────────────────────────────────────────────────────
+STEP 2 — BlueprintEngine.run() drives the node loop
+────────────────────────────────────────────────────────────────────────────────
+runtime.py::BlueprintEngine.run() enters a while-loop on state.current_node != "END".
+Before each node it emits a "node.start" trace event and persists the state to
+SQLite. After the node returns a NodeResult it applies any state_update, advances
+current_node to result.next_node, emits "node.complete", and persists again. If a
+node raises an exception, the error is recorded in state.errors and the engine
+jumps to the node's failure_next.
+
+────────────────────────────────────────────────────────────────────────────────
+[01_CHECK_BRANCH] — CheckBranchNode.run()
+────────────────────────────────────────────────────────────────────────────────
+check_branch.py runs `git rev-parse HEAD` to confirm a git repo exists and
+captures the initial commit SHA. It then runs `git status --porcelain` to reject
+a dirty workspace (uncommitted changes would corrupt the agent's diff-based
+reasoning). Because the current branch ("main") is in settings.protected_branches,
+it calls `git checkout -b agent/1ebaee74-create-a-mainpy-file-in` to create an
+isolated working branch — this is the branch name you see in the final summary.
+The node returns next_node="02_LOAD_TASK" with initial_commit_sha and
+working_branch written into AgentState.
+
+────────────────────────────────────────────────────────────────────────────────
+[02_LOAD_TASK] — LoadTaskNode.run()
+────────────────────────────────────────────────────────────────────────────────
+load_task.py validates that task_text is non-empty (would raise ValueError
+otherwise). It derives repo_name from the basename of workspace_path
+("demo_repo") and marks is_public_repo=False (GitHub API detection is deferred
+to Phase 2). This is a thin normalization step; its main purpose is to ensure
+downstream nodes have clean, trusted task data.
+
+────────────────────────────────────────────────────────────────────────────────
+[03_PREPARE_CONTEXT] — PrepareContextNode.run() → build_context_bundle()
+────────────────────────────────────────────────────────────────────────────────
+prepare_context.py delegates entirely to context.py::build_context_bundle().
+That function scans for rule files (AGENTS.md, CLAUDE.md, etc.) — none exist in
+demo_repo, so repo_rules stays empty. It then runs _detect_build_commands():
+demo_repo has no pyproject.toml, Makefile, package.json, or go.mod, but it does
+have .py files, so it falls back to ["python -m pytest"]. Finally it calls
+_generate_repo_map() → search.py::get_repo_map_tool() to produce a lightweight
+directory tree. All of this is packed into a ContextBundle stored on AgentState.
+
+────────────────────────────────────────────────────────────────────────────────
+[04_IMPLEMENT_TASK] — ImplementTaskNode.run() → run_subsession()
+────────────────────────────────────────────────────────────────────────────────
+implement_task.py builds a ToolRegistry by calling build_dev_toolset() (registry.py),
+which registers 11 tools: read_file, write_file, replace_in_file, apply_patch,
+list_files, search_repo, get_repo_map, run_shell, run_tests, git_diff/status/log.
+It then assembles a SubsessionConfig: the system prompt is built by
+build_implement_system() (prompts.py) — a layered prompt covering agent rules,
+environment, tool guidelines, repo rules, detected build commands, safety rules,
+and task framing. The initial human message comes from build_implement_human(),
+which prepends the task text and repo map. run_subsession() is then called.
+
+────────────────────────────────────────────────────────────────────────────────
+Inside run_subsession() — the LLM tool-call loop (turns 0–18)
+────────────────────────────────────────────────────────────────────────────────
+subsession.py::run_subsession() opens an OpenAI client and enters a for-loop
+(up to max_turns=100). At the top of each iteration it checks wall-clock time and
+calls budgets.py::check_budget() to enforce turn/cost/tool-call limits. Then it
+calls client.chat.completions.create() with the full message history and tool
+schemas, adds the token cost to BudgetState via estimate_cost(), and emits a
+"model_response" trace event.
+
+  Turn 0 (1322→36 tokens, $0.0037):
+    The model decides to create main.py. finish_reason="tool_calls", so
+    registry.execute("write_file", ...) is called → filesystem.py::write_file_tool()
+    writes "demo_repo/main.py" with a hello_world() function (46 bytes).
+    The tool result is appended to messages as a "tool" role message.
+
+  Turn 1 (1376→21 tokens, $0.0037):
+    The model calls run_tests with no command argument → tests.py::run_tests_tool()
+    runs `python -m pytest` which returns exit code 127 ("python: not found").
+
+  Turn 2 (1430→22 tokens, $0.0038):
+    Adapting to the missing `python` binary, the model calls run_shell with
+    `python3 -m pytest` → shell.py::run_shell_tool(). This exits 1 with a
+    requests/urllib3 version conflict warning in stderr.
+
+  Turn 3 (2095→40 tokens, $0.0056):
+    The model tries to fix the environment by running
+    `python3 -m pip install urllib3==1.26.16 chardet==4.0.0` via run_shell.
+    Exit code 0 — packages installed.
+
+  Turn 4 (2571→22 tokens, $0.0066):
+    Re-runs `python3 -m pytest` via run_shell. Exits 1 again — this time with a
+    deeper traceback indicating pytest itself has a compatibility issue.
+
+  Turn 5 (3231→94 tokens, $0.0090):
+    finish_reason="stop" (no tool call), so the subsession exits the tool branch
+    and calls check_is_done() (completion_checker.py). check_is_done() runs
+    `git diff HEAD --stat` (finds no diff because main.py was never committed),
+    then makes a separate OpenAI call with IS_DONE_SYSTEM + the structured
+    check_completion tool. The checker returns is_done=False: "tests have not been
+    run due to environmental issues." build_nudge() formats a <system-nudge>
+    message listing missing steps, which is appended as a "user" role message to
+    push the model forward.
+
+  Turn 6 (3473→10 tokens, $0.0088):
+    Model calls git_diff → git.py::git_diff_tool() returns "No diff (nothing
+    changed from HEAD)" — confirming main.py was written to disk but not committed.
+
+  Turn 7 (3499→111 tokens, $0.0099):
+    The nudge prompts the model to add a test file. It calls write_file →
+    filesystem.py::write_file_tool() writes "demo_repo/test_main.py" (158 bytes).
+
+  Turn 8 (3632→27 tokens, $0.0093):
+    Model runs `python3 -m pytest demo_repo/test_main.py` via run_shell. Exits 1
+    with another pytest traceback.
+
+  Turn 9 (4302→92 tokens, $0.0117):
+    No tool call → check_is_done() again. git diff still shows no committed diff;
+    checker returns is_done=False. Another nudge is injected.
+
+  Turn 10 (4536→10 tokens, $0.0114):
+    Model calls git_diff again — still "No diff (nothing changed from HEAD)".
+
+  Turn 11 (4562→119 tokens, $0.0126):
+    Model rewrites test_main.py (168 bytes) with a slightly different version via
+    write_file.
+
+  Turn 12 (4703→27 tokens, $0.0120):
+    Re-runs `python3 -m pytest demo_repo/test_main.py` — still exits 1, same
+    traceback. The environment issue is with the pytest installation itself, not
+    the test code.
+
+  Turn 13 (5373→74 tokens, $0.0142):
+    No tool call → check_is_done() returns is_done=False again; third nudge
+    injected.
+
+  Turn 14 (5621→23 tokens, $0.0143):
+    Model calls search_repo("hello_world") → search.py::search_repo_tool() uses
+    grep and returns "1:def hello_world():" confirming main.py content exists on
+    disk.
+
+  Turn 15 (5657→10 tokens, $0.0142):
+    Model calls git_diff again — still no committed diff.
+
+  Turn 16 (5683→152 tokens, $0.0157):
+    The model attempts to fix pytest by reinstalling it:
+    `pip uninstall -y pytest && pip install pytest` via run_shell. Exit 0 —
+    reinstall succeeds.
+
+  Turn 17 (6211→23 tokens, $0.0158):
+    Model runs `pytest demo_repo/test_main.py` (without python3 -m). Exits 1 with
+    yet another traceback — the system pytest binary has a conflicting dependency
+    that the reinstall did not resolve.
+
+  Turn 18 (6864→154 tokens, $0.0187):
+    No tool call → check_is_done() is called a final time. The model's last message
+    states "main.py has been created with hello_world(), a test script is prepared,
+    but tests could not run due to environmental issues." The checker accepts this
+    with is_done=True, returning the subsession with status="done".
+    run_subsession() returns (SubsessionResult(status="done", turns=19), state).
+
+────────────────────────────────────────────────────────────────────────────────
+Back in ImplementTaskNode.run() — after run_subsession()
+────────────────────────────────────────────────────────────────────────────────
+implement_task.py emits a "subsession.done" trace event with status/turns/cost.
+It constructs a state_update with the final BudgetState and
+implementation_done=True, then returns NodeResult(next_node="05_CHECKPOINT").
+
+────────────────────────────────────────────────────────────────────────────────
+[05_CHECKPOINT] — CheckpointNode.run()
+────────────────────────────────────────────────────────────────────────────────
+checkpoint.py runs `git status --porcelain` and finds main.py and test_main.py
+as untracked files. It stages everything with `git add -A`, then commits with
+message `agent: implement task 'create a main.py file in /demo_repo directory...'`.
+It captures the new HEAD SHA and returns NodeResult(next_node="END").
+
+────────────────────────────────────────────────────────────────────────────────
+STEP 3 — BlueprintEngine loop exits, final summary printed
+────────────────────────────────────────────────────────────────────────────────
+With current_node="END" the while-loop exits. BlueprintEngine.run() promotes
+task_status from "running" to "done", calls state_store.finalize_session(), and
+returns the final AgentState. cli.main() prints the summary block:
+Status=done, Branch=agent/1ebaee74-..., Cost=$0.2010, Turns=19, Tools=15.
