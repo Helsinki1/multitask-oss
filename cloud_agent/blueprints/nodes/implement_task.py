@@ -3,6 +3,7 @@
 The main implementation loop. Model inspects, edits, runs commands.
 """
 
+from cloud_agent.agent.escalation import EscalationConfig
 from cloud_agent.agent.prompts import build_implement_human, build_implement_system
 from cloud_agent.agent.runtime import Node, NodeResult
 from cloud_agent.agent.state import AgentState
@@ -24,6 +25,16 @@ class ImplementTaskNode(Node):
         registry = ToolRegistry()
         build_dev_toolset(registry)
 
+        escalation_config = EscalationConfig(
+            default_model=settings.implement_model,
+            escalated_model=settings.escalated_model,
+            escalation_enabled=settings.escalation_enabled,
+            max_escalations=settings.max_escalations,
+            escalation_after_failed_completion_checks=settings.escalation_after_failed_completion_checks,
+            escalation_after_repeated_tool_failures=settings.escalation_after_repeated_tool_failures,
+            escalation_after_turn_fraction=settings.escalation_after_turn_fraction,
+        )
+
         config = SubsessionConfig(
             name="implement_task",
             system_prompt=build_implement_system(state, state.context_bundle),
@@ -33,6 +44,7 @@ class ImplementTaskNode(Node):
             max_turns=state.budgets.max_llm_turns,
             max_wall_seconds=state.budgets.max_wall_seconds,
             max_tokens=8192,
+            escalation_config=escalation_config,
         )
 
         result, updated_state = run_subsession(config, state, registry, self.tracer)

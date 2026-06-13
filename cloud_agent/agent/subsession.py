@@ -10,6 +10,13 @@ import openai
 
 from cloud_agent.agent.budgets import BudgetExhausted, check_budget, estimate_cost
 from cloud_agent.agent.completion_checker import IsDoneOutput, check_is_done
+from cloud_agent.agent.escalation import (
+    EscalationConfig,
+    EscalationMetrics,
+    build_escalation_message,
+    record_tool_result,
+    should_escalate,
+)
 from cloud_agent.agent.prompts import build_nudge
 from cloud_agent.agent.state import AgentState
 from cloud_agent.config import settings
@@ -27,6 +34,7 @@ class SubsessionConfig:
     max_turns: int = 100
     max_wall_seconds: int = 7200
     max_tokens: int = 8192
+    escalation_config: EscalationConfig | None = None
 
 
 @dataclass
@@ -55,6 +63,40 @@ def run_subsession(
     total_cost = 0.0
     last_text = ""
 
+    # Escalation state — only active when escalation_config is provided
+    esc = config.escalation_config
+    metrics: EscalationMetrics | None = EscalationMetrics(current_model=config.model) if esc else None
+    current_model = config.model
+
+    def _maybe_escalate(turn: int, check_text: str = "") -> None:
+        nonlocal current_model
+        if esc is None or metrics is None:
+            return
+        triggered, reason = should_escalate(esc, metrics, turn, config.max_turns, check_text)
+        if not triggered:
+            return
+        esc_msg = build_escalation_message(
+            task_text=state.task_text,
+            reason=reason,
+            turn=turn,
+            cost_so_far=total_cost,
+            messages=messages,
+            escalated_model=esc.escalated_model,
+        )
+        messages.append({"role": "user", "content": esc_msg})
+        old_model = current_model
+        current_model = esc.escalated_model
+        metrics.current_model = current_model
+        metrics.escalation_count += 1
+        metrics.escalation_reason = reason
+        tracer.emit("model.escalated", {
+            "old_model": old_model,
+            "new_model": current_model,
+            "reason": reason,
+            "turn": turn,
+            "cost_so_far": total_cost,
+        })
+
     for turn in range(config.max_turns):
         elapsed = time.time() - start_time
         if elapsed > config.max_wall_seconds:
@@ -79,8 +121,11 @@ def run_subsession(
                 total_cost_usd=total_cost,
             ), state
 
+        # Check turn-fraction escalation before calling the model
+        _maybe_escalate(turn)
+
         api_kwargs: dict = dict(
-            model=config.model,
+            model=current_model,
             max_tokens=config.max_tokens,
             messages=messages,
         )
@@ -105,7 +150,7 @@ def run_subsession(
 
         input_tokens = response.usage.prompt_tokens
         output_tokens = response.usage.completion_tokens
-        cost = estimate_cost(config.model, input_tokens, output_tokens)
+        cost = estimate_cost(current_model, input_tokens, output_tokens)
         total_cost += cost
         state = state.apply_update({
             "budgets": state.budgets.copy_with(
@@ -116,7 +161,7 @@ def run_subsession(
 
         tracer.emit("model_response", {
             "turn": turn,
-            "model": config.model,
+            "model": current_model,
             "input_tokens": input_tokens,
             "output_tokens": output_tokens,
             "cost_usd": cost,
@@ -142,6 +187,8 @@ def run_subsession(
             for tc in msg.tool_calls:
                 args = json.loads(tc.function.arguments)
                 result_str = registry.execute(tc.function.name, args, state.workspace_path)
+                if metrics is not None:
+                    record_tool_result(metrics, tc.function.name, args, result_str)
                 state = state.apply_update({
                     "budgets": state.budgets.copy_with(
                         used_tool_calls=state.budgets.used_tool_calls + 1,
@@ -156,6 +203,8 @@ def run_subsession(
                     "tool_call_id": tc.id,
                     "content": result_str,
                 })
+            # Check escalation after all tool calls in this turn
+            _maybe_escalate(turn)
         else:
             done: IsDoneOutput = check_is_done(
                 task_text=state.task_text,
@@ -178,8 +227,14 @@ def run_subsession(
                     total_cost_usd=total_cost,
                 ), state
 
+            if metrics is not None:
+                metrics.failed_completion_checks += 1
+
             nudge = build_nudge(done.missing_steps, done.reason)
             messages.append({"role": "user", "content": nudge})
+
+            # Check escalation after failed completion check (also detects blocked text)
+            _maybe_escalate(turn, last_text)
 
     return SubsessionResult(
         status="budget_exhausted",
