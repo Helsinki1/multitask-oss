@@ -228,3 +228,25 @@ TestEscalationAfterRepeatedToolFailures	Same command twice triggers; different c
 TestEscalationTraceEvent	Integration: model.escalated event payload verified; escalated model used in subsequent API calls; context message injected
 TestMaxEscalations	No second escalation; max_escalations=0 blocks all; exactly one switch in a full subsession run
 TestHelpers	_is_tool_failure, _is_blocked_text, turn-fraction math, build_escalation_message content
+
+
+
+
+
+pyproject.toml — added datasets>=2.14
+
+bench.py — new standalone runner with this flow per instance:
+
+Clone repo once into ~/.swebench_cache/repos/<org>__<repo>/ (reused across runs, just git fetch on subsequent runs)
+git worktree add -b swebench/<instance_id> <tmpdir> <base_commit> — isolated workspace, no full copy of repo
+Build task text from problem_statement + FAIL_TO_PASS test names
+Call build_devloop() + engine.run() directly — same pipeline as the CLI, zero pipeline changes
+git diff <base_commit> HEAD → extract patch
+Append {instance_id, model_patch, model_name_or_path} to output JSONL
+Clean up worktree
+To run:
+
+
+pip install -e .                           # picks up datasets dep
+python bench.py --n 1 --max-turns 20      # smoke test (1 instance)
+python bench.py --n 10 --output results.jsonl
