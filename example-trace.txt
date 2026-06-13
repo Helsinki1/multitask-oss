@@ -198,3 +198,33 @@ With current_node="END" the while-loop exits. BlueprintEngine.run() promotes
 task_status from "running" to "done", calls state_store.finalize_session(), and
 returns the final AgentState. cli.main() prints the summary block:
 Status=done, Branch=agent/1ebaee74-..., Cost=$0.2010, Turns=19, Tools=15.
+
+
+
+New file: cloud_agent/agent/escalation.py
+Contains the entire escalation policy as a self-contained, testable module:
+
+EscalationConfig — all 7 config fields from the spec (default_model, escalated_model, escalation_enabled, max_escalations, escalation_after_failed_completion_checks, escalation_after_repeated_tool_failures, escalation_after_turn_fraction)
+EscalationMetrics — mutable tracking state (current_model, escalation_count, failed_completion_checks, repeated_tool_failure_count, escalation_reason, plus internal _last_failing_key / _consecutive_same_failure)
+should_escalate(config, metrics, turn, max_turns, last_text="") — pure function, no side effects, returns (bool, reason_str). Checks all 4 conditions in priority order; short-circuits on disabled/max reached/same model
+record_tool_result(metrics, tool_name, args, result) — updates the consecutive-failure streak. Uses exit code: N regex and traceback detection to match run_shell_tool / run_tests_tool output format exactly. Consecutive failures of the same command key increment the counter; success or a different command resets it
+build_escalation_message(...) — scans conversation history to extract files written, commands attempted, recent failures, and formats a developer context message injected into the chat
+Modified: cloud_agent/agent/subsession.py
+Added escalation_config: EscalationConfig | None = None to SubsessionConfig (backwards compatible default)
+Added _maybe_escalate(turn, check_text="") closure inside run_subsession — checks should_escalate, injects the context message, switches current_model, increments escalation_count, emits the model.escalated trace event
+Escalation is checked at three points per turn: (1) before the model call (catches turn-fraction), (2) after all tool calls (catches repeated failures), (3) after a failed completion check (catches stuck state + blocked text)
+current_model is used everywhere config.model was — API calls, estimate_cost, trace events
+Modified: cloud_agent/config.py
+Added 6 new settings read from env vars with the defaults from the spec (ESCALATED_MODEL, ESCALATION_ENABLED, MAX_ESCALATIONS, ESCALATION_AFTER_FAILED_CHECKS, ESCALATION_AFTER_TOOL_FAILURES, ESCALATION_TURN_FRACTION).
+
+Modified: cloud_agent/blueprints/nodes/implement_task.py
+Constructs EscalationConfig from settings and passes it into SubsessionConfig. No changes to the node graph.
+
+New file: tests/test_escalation.py (28 tests, all passing)
+Test class	Covers
+TestNoEscalationOnSuccess	No escalation on clean run, disabled flag, same-model no-op, success resets counter
+TestEscalationAfterFailedCompletionChecks	Threshold at/below/edge cases
+TestEscalationAfterRepeatedToolFailures	Same command twice triggers; different commands don't chain; success resets; traceback counts; run_tests tracked
+TestEscalationTraceEvent	Integration: model.escalated event payload verified; escalated model used in subsequent API calls; context message injected
+TestMaxEscalations	No second escalation; max_escalations=0 blocks all; exactly one switch in a full subsession run
+TestHelpers	_is_tool_failure, _is_blocked_text, turn-fraction math, build_escalation_message content
