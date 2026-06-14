@@ -61,6 +61,12 @@ class Tracer:
             print(f"  is_done={done} ({reason})", file=sys.stderr)
         elif event_type == "subsession.done":
             print(f"  subsession complete: {data.get('status', '')}", file=sys.stderr)
+        elif event_type == "history.compressed":
+            print(
+                f"  [compression] turn {data.get('turn')}: stale tool results truncated"
+                f" (keeping {data.get('keep_turns')} recent turns)",
+                file=sys.stderr,
+            )
         elif event_type in ("task.cancelled", "task.budget_exhausted"):
             print(f"[TASK] {event_type}", file=sys.stderr)
 

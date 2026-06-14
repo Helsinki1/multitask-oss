@@ -22,12 +22,12 @@ class Settings:
         self.openai_api_key = os.environ.get("OPENAI_API_KEY", "")
         self.db_path = os.environ.get("DB_PATH", "cloud_agent.db")
         self.traces_dir = os.environ.get("TRACES_DIR", "traces")
-        self.implement_model = os.environ.get("IMPLEMENT_MODEL", "gpt-4o")
+        self.implement_model = os.environ.get("IMPLEMENT_MODEL", "codex-5.2")
         self.checker_model = os.environ.get("CHECKER_MODEL", "gpt-4o-mini")
         self.pr_description_model = os.environ.get("PR_DESC_MODEL", "gpt-4o-mini")
         self.protected_branches = ["main", "master", "develop", "production", "release"]
 
-        self.escalated_model = os.environ.get("ESCALATED_MODEL", "gpt-4o")
+        self.escalated_model = os.environ.get("ESCALATED_MODEL", "codex-5.2")
         self.escalation_enabled = os.environ.get("ESCALATION_ENABLED", "true").lower() == "true"
         self.max_escalations = int(os.environ.get("MAX_ESCALATIONS", "1"))
         self.escalation_after_failed_completion_checks = int(

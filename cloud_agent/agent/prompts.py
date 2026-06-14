@@ -117,10 +117,32 @@ def build_implement_system(state: object, context_bundle: object) -> str:
 def build_implement_human(state: object) -> str:
     cb = getattr(state, "context_bundle", None)
     repo_map = getattr(cb, "repo_map", "") if cb else ""
+    task_adjacent_files = getattr(cb, "task_adjacent_files", []) if cb else []
 
     parts = [f"Task: {state.task_text}"]
     if repo_map:
         parts.append(f"Repository overview:\n{repo_map}")
+    if task_adjacent_files:
+        remaining = 12000
+        file_sections: list[str] = []
+        for file_info in task_adjacent_files:
+            path = file_info.get("path", "")
+            content = file_info.get("content", "")
+            wrapper_overhead = len(f'<file path="{path}">\n\n</file>\n')
+            available = remaining - wrapper_overhead
+            if available <= 0:
+                break
+            if len(content) > available:
+                content = content[:available]
+            file_sections.append(f'<file path="{path}">\n{content}\n</file>')
+            remaining -= wrapper_overhead + len(content)
+            if remaining <= 0:
+                break
+        if file_sections:
+            parts.append(
+                "Likely relevant files (pre-loaded for you):\n"
+                + "\n".join(file_sections)
+            )
     parts.append(
         "Begin by inspecting the relevant code, then make the necessary changes, "
         "run the tests, and confirm the task is complete."

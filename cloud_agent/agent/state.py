@@ -41,6 +41,7 @@ class ContextBundle:
     coding_standards: list[str] = field(default_factory=list)
     build_and_test_commands: list[str] = field(default_factory=list)
     repo_map: str = ""
+    task_adjacent_files: list[dict] = field(default_factory=list)
 
 
 @dataclass

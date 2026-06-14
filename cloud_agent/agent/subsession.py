@@ -46,6 +46,29 @@ class SubsessionResult:
     total_cost_usd: float = 0.0
 
 
+_COMPRESS_AFTER_TURN = 20
+_KEEP_RECENT_TURNS = 6
+
+
+def _compress_history(messages: list[dict], keep_turns: int = 6) -> None:
+    """Truncate tool message content for turns older than keep_turns. Mutates in place.
+
+    Walks backward counting assistant-with-tool-calls as turn boundaries.
+    Tool messages beyond keep_turns are collapsed to 120 chars so the model
+    retains a breadcrumb of what ran without burning context on stale output.
+    The tool_call_id chain is preserved so OpenAI's message structure stays valid.
+    """
+    turns_seen = 0
+    for i in range(len(messages) - 1, -1, -1):
+        msg = messages[i]
+        if msg["role"] == "assistant" and msg.get("tool_calls"):
+            turns_seen += 1
+        if turns_seen > keep_turns and msg["role"] == "tool":
+            content = msg.get("content", "")
+            if len(content) > 120:
+                msg["content"] = content[:120] + f" … [compressed, was {len(content)} chars]"
+
+
 def run_subsession(
     config: SubsessionConfig,
     state: AgentState,
@@ -124,6 +147,12 @@ def run_subsession(
         # Check turn-fraction escalation before calling the model
         _maybe_escalate(turn)
 
+        # Compress stale tool results once we hit the threshold, then every turn after
+        if turn >= _COMPRESS_AFTER_TURN:
+            _compress_history(messages, keep_turns=_KEEP_RECENT_TURNS)
+            if turn == _COMPRESS_AFTER_TURN:
+                tracer.emit("history.compressed", {"turn": turn, "keep_turns": _KEEP_RECENT_TURNS})
+
         api_kwargs: dict = dict(
             model=current_model,
             max_tokens=config.max_tokens,
@@ -132,17 +161,33 @@ def run_subsession(
         if config.tools_schema:
             api_kwargs["tools"] = config.tools_schema
 
-        try:
-            response = client.chat.completions.create(**api_kwargs)
-        except openai.APIError as exc:
-            tracer.emit("model_error", {"error": str(exc), "turn": turn})
-            return SubsessionResult(
-                status="error",
-                messages=messages,
-                summary=f"API error: {exc}",
-                total_turns=turn,
-                total_cost_usd=total_cost,
-            ), state
+        response = None
+        for attempt in range(3):
+            try:
+                response = client.chat.completions.create(**api_kwargs)
+                break
+            except openai.RateLimitError as exc:
+                wait = min(2 ** attempt * 5, 60)
+                tracer.emit("model_error", {"error": str(exc), "turn": turn, "retry_in": wait})
+                if attempt == 3:
+                    return SubsessionResult(
+                        status="error",
+                        messages=messages,
+                        summary=f"Rate limit exhausted after retries: {exc}",
+                        total_turns=turn,
+                        total_cost_usd=total_cost,
+                    ), state
+                time.sleep(wait)
+            except openai.APIError as exc:
+                tracer.emit("model_error", {"error": str(exc), "turn": turn})
+                return SubsessionResult(
+                    status="error",
+                    messages=messages,
+                    summary=f"API error: {exc}",
+                    total_turns=turn,
+                    total_cost_usd=total_cost,
+                ), state
+        assert response is not None
 
         choice = response.choices[0]
         msg = choice.message

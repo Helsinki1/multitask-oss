@@ -22,6 +22,11 @@ def main() -> None:
     parser.add_argument("--max-turns", type=int, default=100, help="Max LLM turns (default: 100)")
     parser.add_argument("--max-cost", type=float, default=5.0, help="Max cost in USD (default: $5)")
     parser.add_argument("--model", default=None, help="Override implement model")
+    parser.add_argument(
+        "--reset-repo",
+        action="store_true",
+        help="Reset the repo to a clean state before running (git reset --hard + clean)",
+    )
     args = parser.parse_args()
 
     if not settings.openai_api_key:
@@ -32,6 +37,12 @@ def main() -> None:
     if not os.path.isdir(repo_path):
         print(f"Error: repo path does not exist: {repo_path}", file=sys.stderr)
         sys.exit(1)
+
+    if args.reset_repo:
+        import subprocess
+        print(f"Resetting repo at {repo_path}...")
+        subprocess.run(["git", "reset", "--hard", "HEAD"], cwd=repo_path, check=True)
+        subprocess.run(["git", "clean", "-fd"], cwd=repo_path, check=True)
 
     if args.model:
         settings.implement_model = args.model
