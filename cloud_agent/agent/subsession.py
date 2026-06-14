@@ -50,6 +50,13 @@ _COMPRESS_AFTER_TURN = 20
 _KEEP_RECENT_TURNS = 6
 
 
+def _token_limit_kwargs(model: str, max_tokens: int) -> dict[str, int]:
+    """Return the token limit parameter supported by the selected model family."""
+    if model.startswith("gpt-5") or model.startswith("codex-"):
+        return {"max_completion_tokens": max_tokens}
+    return {"max_tokens": max_tokens}
+
+
 def _compress_history(messages: list[dict], keep_turns: int = 6) -> None:
     """Truncate tool message content for turns older than keep_turns. Mutates in place.
 
@@ -155,21 +162,22 @@ def run_subsession(
 
         api_kwargs: dict = dict(
             model=current_model,
-            max_tokens=config.max_tokens,
             messages=messages,
+            **_token_limit_kwargs(current_model, config.max_tokens),
         )
         if config.tools_schema:
             api_kwargs["tools"] = config.tools_schema
 
         response = None
-        for attempt in range(3):
+        max_attempts = 3
+        for attempt in range(max_attempts):
             try:
                 response = client.chat.completions.create(**api_kwargs)
                 break
             except openai.RateLimitError as exc:
                 wait = min(2 ** attempt * 5, 60)
                 tracer.emit("model_error", {"error": str(exc), "turn": turn, "retry_in": wait})
-                if attempt == 3:
+                if attempt == max_attempts - 1:
                     return SubsessionResult(
                         status="error",
                         messages=messages,

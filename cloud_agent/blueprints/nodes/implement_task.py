@@ -58,6 +58,7 @@ class ImplementTaskNode(Node):
         state_update = {
             "budgets": updated_state.budgets,
             "implementation_done": result.status == "done",
+            "task_status": "running" if result.status == "done" else "failed",
         }
 
         return NodeResult(

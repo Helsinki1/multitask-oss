@@ -17,6 +17,7 @@ from cloud_agent.agent.escalation import (
     should_escalate,
 )
 from cloud_agent.agent.state import AgentState, BudgetState
+from cloud_agent.agent.subsession import _token_limit_kwargs
 
 
 # ---------------------------------------------------------------------------
@@ -389,6 +390,12 @@ class TestMaxEscalations:
 # ---------------------------------------------------------------------------
 
 class TestHelpers:
+    def test_token_limit_kwargs_uses_max_completion_tokens_for_gpt5(self):
+        assert _token_limit_kwargs("gpt-5.4-mini", 8192) == {"max_completion_tokens": 8192}
+
+    def test_token_limit_kwargs_keeps_max_tokens_for_gpt4o(self):
+        assert _token_limit_kwargs("gpt-4o-mini", 8192) == {"max_tokens": 8192}
+
     def test_is_tool_failure_exit_code_1(self):
         assert _is_tool_failure("$ pytest\nexit code: 1\nFAIL")
 

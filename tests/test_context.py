@@ -85,13 +85,13 @@ def test_fetch_remote_agents_files_uses_github_raw_url(monkeypatch):
     assert calls[0] == "https://raw.githubusercontent.com/org/repo/main/AGENTS.md"
 
 
-def test_default_implement_model_is_codex_not_opus(monkeypatch):
+def test_default_implement_model_is_current_codex_model_not_opus(monkeypatch):
     monkeypatch.delenv("IMPLEMENT_MODEL", raising=False)
     monkeypatch.delenv("ESCALATED_MODEL", raising=False)
 
     settings = Settings()
 
-    assert settings.implement_model == "codex-5.2"
-    assert settings.escalated_model == "codex-5.2"
+    assert settings.implement_model == "gpt-5.4-mini"
+    assert settings.escalated_model == "gpt-5.5"
     assert "opus" not in settings.implement_model
     assert "opus" not in settings.escalated_model
