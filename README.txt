@@ -10,15 +10,30 @@ Improvements
     * expand tool metadata toward the plan, validate schemas, include examples/limits, and make tool results structured enough to summarize failures
 3. multiple attempts + retry metadata: failed command, suspected cause, changed files, why prior fix failed, next constraint. Feed that into the next attempt and block exact repeated commands/patches unless justified
 
+4. confine agent just bash, then give it self-evo abilities by letting it write Python scripts for itself mid-run that persist/compound during the run
+5. make agent reproduce the issue: Analyze codebase, write a reproduction script that fails, edit source code to fix it, verify the repro now passes, test edge cases, implement on actual repo
+6. force agent to make one bash exec per turn
+7. environmental noise suppression: PAGER=cat, MANPAGER=cat, TQDM_DISABLE=1, PIP_PROGRESS_BAR=off -- eliminates the garbage (progress bars, pagers, ANSI codes) that eats context tokens and confuses models
+8. set temperature=0
+9. linear ReAct history: dead simple, every turn appends to the same message list. No tree search, no branching, no subsession splits. The model just keeps going
+
+
 * Web search to look up documentation, history of related work, best practices, 
 * shouldnt there be preliminary descriptions for each tool call so the LLM can understand what each tool call does? Kind of like loading skill.md files?
 * 150-line capped reads for file discovery is a limitation
 
 
 
+references
+- opencode
+- openharness https://github.com/HKUDS/OpenHarness
+- openautocoder/live-swe-agent
 
 
-
+clear product vision
+- harness for devin/minion-like coding agent, with autonomy to commit/push, experiment, and test environment
+- TUI to multitask and manage multiple agents in one codebase simultaneously
+- goal is to max out swe-bench-lite 
 
 
 
