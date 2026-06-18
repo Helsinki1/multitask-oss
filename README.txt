@@ -1,13 +1,10 @@
 Done
 * memory compression after 20 conversation turns
 * prompt injection for likely relevant files
-* terminal commands, background processes
+* cut down tooling from 11 to 4: run_shell, read_file, write_file, replace_in_file (rely on LLM strength in reliable unix patterns)
 
 Improvements
 1. better testing environment: every test that involves a non-trivial app should open Docker and run servers and requests scripts inside it
-2. better tools: changed-file gathering, language-aware lint/format/test selection, and a related-tests loop
-    * after 04_IMPLEMENT_TASK, every run records changed files, selected test commands, exit codes, and final diff/test evidence
-    * expand tool metadata toward the plan, validate schemas, include examples/limits, and make tool results structured enough to summarize failures
 3. multiple attempts + retry metadata: failed command, suspected cause, changed files, why prior fix failed, next constraint. Feed that into the next attempt and block exact repeated commands/patches unless justified
 
 4. confine agent just bash, then give it self-evo abilities by letting it write Python scripts for itself mid-run that persist/compound during the run
@@ -17,6 +14,7 @@ Improvements
 8. set temperature=0
 9. linear ReAct history: dead simple, every turn appends to the same message list. No tree search, no branching, no subsession splits. The model just keeps going
 
+(5, 1) 4, 6, 9, (8, 7), 3
 
 * Web search to look up documentation, history of related work, best practices, 
 * shouldnt there be preliminary descriptions for each tool call so the LLM can understand what each tool call does? Kind of like loading skill.md files?
@@ -28,7 +26,8 @@ references
 - opencode
 - openharness https://github.com/HKUDS/OpenHarness
 - openautocoder/live-swe-agent
-
+- openautocoder/agentless
+- claude code behavior: read/bash/edit (we could stick with this but direct it to Reproduce)
 
 clear product vision
 - harness for devin/minion-like coding agent, with autonomy to commit/push, experiment, and test environment

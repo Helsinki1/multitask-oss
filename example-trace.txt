@@ -1,6 +1,6 @@
 Example Trace Walkthrough
 =========================
-Command: python3 -m cloud_agent.cli --repo ./demo_repo --task "create a main.py file..."
+Command: python3 -m cloud_agent.cli --repo ./demo_repo --reset-repo --task "..."
 
 ────────────────────────────────────────────────────────────────────────────────
 STEP 0 — cli.main() bootstraps the run

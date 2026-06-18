@@ -25,24 +25,45 @@ Environment:
 """
 
 LAYER_3_TOOLS = """\
-Tool guidelines:
-- read_file: read file content with line numbers. Use start_line/end_line for large files.
-- search_repo: find files/symbols before reading them. Faster than reading directories.
-- get_repo_map: structural overview of the repo (use once to orient yourself).
-- replace_in_file: preferred for targeted edits to existing files (exact text match).
-- apply_patch: use for multi-file or complex edits (unified diff format).
-- write_file: for new files only.
-- run_shell: for build, install, lint, and other shell operations.
-- run_tests: for test suites — returns parsed pass/fail counts.
-- git_diff: review what you changed so far.
-- git_status: see current staged/unstaged files.
+Tools available:
+- run_shell: run any bash command — use for git, search, tests, install, build, lint.
+- read_file: read a file with line numbers. Use start_line/end_line to slice large files.
+- write_file: create a new file only (not for overwriting).
+- replace_in_file: edit an existing file by exact-text replacement.
 
 Workflow pattern:
-1. get_repo_map or search_repo to orient yourself
-2. read_file the relevant files (note the line numbers)
-3. replace_in_file or apply_patch to edit
-4. run_tests to verify
-5. git_diff to review your changes\
+1. run_shell to explore the repo (find, grep, ls, git log)
+2. read_file the relevant files, slicing large ones
+3. replace_in_file to edit existing files, write_file to create new ones
+4. run_shell to run tests and verify
+5. run_shell("git diff HEAD") to review your changes\
+"""
+
+LAYER_BASH_SKILLS = """\
+Bash reference — use run_shell for all of these instead of dedicated tools:
+
+Explore / search:
+  find . -type f -name "*.py" | grep -v __pycache__ | head -50
+  grep -rn "ClassName\\|function_name" --include="*.py" . | head -30
+  ls -la src/
+
+Read large files in slices with read_file(start_line=N, end_line=M).
+For files under ~100 lines, cat via run_shell is fine.
+
+Run tests:
+  python -m pytest tests/ -x -q 2>&1 | tail -40
+  python -m pytest tests/test_foo.py::test_bar -xvs
+  python repro_test.py; echo "exit: $?"
+
+Git:
+  git diff HEAD
+  git diff HEAD -- path/to/file.py
+  git status --short
+  git log --oneline -10
+
+Install / env:
+  pip install -e . 2>&1 | tail -5
+  pip install -r requirements.txt -q\
 """
 
 LAYER_6_SAFETY = """\
@@ -72,9 +93,9 @@ Missing steps:
 Reason: {reason}
 
 Action required:
-- Run git_diff to review what you changed so far.
+- Run run_shell("git diff HEAD") to review what you changed so far.
 - Review the task requirements against your changes.
-- Run or explain the relevant tests.
+- Run the relevant tests via run_shell.
 - Continue until the task is complete or you are genuinely blocked.
 
 Do not stop until you have concrete evidence (test output, diff, verification).
@@ -94,6 +115,7 @@ def build_implement_system(state: object, context_bundle: object) -> str:
         LAYER_1_BASE,
         LAYER_2_ENV.format(working_branch=getattr(state, "working_branch", "unknown")),
         LAYER_3_TOOLS,
+        LAYER_BASH_SKILLS,
     ]
 
     cb = context_bundle
