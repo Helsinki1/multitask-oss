@@ -21,7 +21,8 @@ Environment:
 - You are working directly in a local repository checkout on branch: {working_branch}
 - Shell access via run_shell (commands run in the repo directory).
 - Git is available. Do NOT push or create PRs — the pipeline handles that.
-- You can install missing dependencies with run_shell("pip install X") or similar.\
+- You can install missing dependencies with run_shell("pip install X") or similar.
+- _agent_scripts/ is pre-seeded with helpers (docker_run.py). Write your own scripts there for complex/repeated operations.\
 """
 
 LAYER_3_TOOLS = """\
@@ -63,7 +64,47 @@ Git:
 
 Install / env:
   pip install -e . 2>&1 | tail -5
-  pip install -r requirements.txt -q\
+  pip install -r requirements.txt -q
+
+Docker (isolated environment — docker_run.py is pre-seeded):
+  python _agent_scripts/docker_run.py "pip install -e ."
+  python _agent_scripts/docker_run.py "python _repro_test.py"
+  python _agent_scripts/docker_run.py "python -m pytest tests/ -x -q 2>&1 | tail -40"
+  python _agent_scripts/docker_run.py --status
+
+Custom scripts:
+  Write Python helpers to _agent_scripts/ for any repeated or complex operations.
+  Call them via run_shell("python _agent_scripts/my_helper.py <args>").
+  These persist for the entire run and can import each other.\
+"""
+
+LAYER_REPRO_STRATEGY = """\
+Reproduce-first strategy:
+Apply when: fixing a bug, resolving an error, or fixing a failing test.
+Skip when: the task is purely additive (new feature, new file, new function, refactor, docs).
+
+When it applies — before touching any source code:
+1. Write _repro_test.py at the repo root that exercises the bug and FAILS.
+   The script must exit non-zero to confirm the bug exists.
+2. Run it: run_shell("python _agent_scripts/docker_run.py 'python _repro_test.py'")
+   (or run_shell("python _repro_test.py") if Docker is not needed)
+3. Confirm it fails. Then fix the source code.
+4. Re-run the repro to confirm it now passes.
+5. Run the full test suite to check for regressions.
+
+Your implementation is only complete when the repro passes AND the test suite passes.
+Do not skip the repro step — it is the primary evidence that the fix is correct.\
+"""
+
+LAYER_REPRO_CONTEXT_TEMPLATE = """\
+A reproduction script _repro_test.py was written and currently FAILS:
+---
+{repro_output}
+---
+Your implementation is complete when:
+  python _repro_test.py    exits 0
+  python -m pytest tests/  passes (no regressions)
+Verify both before declaring done.\
 """
 
 LAYER_6_SAFETY = """\
@@ -131,7 +172,11 @@ def build_implement_system(state: object, context_bundle: object) -> str:
         cmds_text = "\n".join(f"- {c}" for c in cb.build_and_test_commands)
         layers.append(f"Build and test commands:\n{cmds_text}")
 
-    layers += [LAYER_6_SAFETY, LAYER_7_IMPLEMENT]
+    repro_output = getattr(state, "repro_output", "")
+    if getattr(state, "repro_confirmed", False) and repro_output:
+        layers.append(LAYER_REPRO_CONTEXT_TEMPLATE.format(repro_output=repro_output[:800]))
+
+    layers += [LAYER_REPRO_STRATEGY, LAYER_6_SAFETY, LAYER_7_IMPLEMENT]
 
     return "\n\n---\n\n".join(layers)
 

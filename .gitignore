@@ -8,3 +8,4 @@ dist/
 build/
 traces/
 .pytest_cache/
+/demo_repo/
