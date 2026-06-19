@@ -54,7 +54,7 @@ class CheckBranchNode(Node):
                 raise RuntimeError(f"Failed to create branch '{working_branch}': {err2}")
 
         return NodeResult(
-            next_node="02_LOAD_TASK",
+            next_node="SEED_SCRIPTS",
             state_update={
                 "initial_commit_sha": sha,
                 "working_branch": working_branch,

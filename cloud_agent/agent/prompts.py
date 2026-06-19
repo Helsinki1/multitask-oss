@@ -73,9 +73,13 @@ Docker (isolated environment — docker_run.py is pre-seeded):
   python _agent_scripts/docker_run.py --status
 
 Custom scripts:
-  Write Python helpers to _agent_scripts/ for any repeated or complex operations.
+  Write a Python helper to _agent_scripts/ only when it saves 10+ lines of bash
+  or meaningfully condenses logic that would otherwise clutter the main devloop.
   Call them via run_shell("python _agent_scripts/my_helper.py <args>").
-  These persist for the entire run and can import each other.\
+  Every script MUST open with a docstring that states:
+    - Purpose: what it does
+    - Problem: what it solves / why a raw bash one-liner isn't enough
+    - Usage: exact example invocation(s)\
 """
 
 LAYER_REPRO_STRATEGY = """\
