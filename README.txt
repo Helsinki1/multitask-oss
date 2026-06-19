@@ -7,12 +7,13 @@ Improvements
 1. better testing environment: every test that involves a non-trivial app should open Docker and run servers and requests scripts inside it
 3. multiple attempts + retry metadata: failed command, suspected cause, changed files, why prior fix failed, next constraint. Feed that into the next attempt and block exact repeated commands/patches unless justified
 
-4. confine agent just bash, then give it self-evo abilities by letting it write Python scripts for itself mid-run that persist/compound during the run
-5. make agent reproduce the issue: Analyze codebase, write a reproduction script that fails, edit source code to fix it, verify the repro now passes, test edge cases, implement on actual repo
+4. give it self-evo abilities by letting it write Python scripts for itself mid-run that persist/compound during the run
+5. reproducibility pipeline (not optional): Analyze codebase, write a reproduction script that fails, edit source code to fix it, verify the repro now passes, test edge cases, implement on actual repo
 6. force agent to make one bash exec per turn
 7. environmental noise suppression: PAGER=cat, MANPAGER=cat, TQDM_DISABLE=1, PIP_PROGRESS_BAR=off -- eliminates the garbage (progress bars, pagers, ANSI codes) that eats context tokens and confuses models
 8. set temperature=0
 9. linear ReAct history: dead simple, every turn appends to the same message list. No tree search, no branching, no subsession splits. The model just keeps going
+10. model-agnostic routing: cheap models for file discovery, strong models for patch generation
 
 (5, 1) 4, 6, 9, (8, 7), 3
 
