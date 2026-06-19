@@ -10,6 +10,13 @@ class Settings:
     pr_description_model: str
     protected_branches: list[str]
 
+    # Docker + sandbox
+    docker_image: str
+    agent_workspace: str
+
+    # Reproduce-first
+    repro_max_turns: int
+
     # Escalation
     escalated_model: str
     escalation_enabled: bool
@@ -26,6 +33,10 @@ class Settings:
         self.checker_model = os.environ.get("CHECKER_MODEL", "gpt-4o-mini")
         self.pr_description_model = os.environ.get("PR_DESC_MODEL", "gpt-4o-mini")
         self.protected_branches = ["main", "master", "develop", "production", "release"]
+
+        self.docker_image = os.environ.get("AGENT_DOCKER_IMAGE", "python:3.10-slim")
+        self.agent_workspace = os.environ.get("AGENT_WORKSPACE", "")
+        self.repro_max_turns = int(os.environ.get("REPRO_MAX_TURNS", "15"))
 
         self.escalated_model = os.environ.get("ESCALATED_MODEL", "gpt-5.5")
         self.escalation_enabled = os.environ.get("ESCALATION_ENABLED", "true").lower() == "true"

@@ -15,6 +15,8 @@ Improvements
 9. linear ReAct history: dead simple, every turn appends to the same message list. No tree search, no branching, no subsession splits. The model just keeps going
 10. model-agnostic routing: cheap models for file discovery, strong models for patch generation
 
+- in live-swe-agent, are custom scripts / reproducing optional or pipelined?
+
 (5, 1) 4, 6, 9, (8, 7), 3
 
 * Web search to look up documentation, history of related work, best practices, 
