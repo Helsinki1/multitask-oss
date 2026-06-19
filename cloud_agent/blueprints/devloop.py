@@ -7,6 +7,7 @@ from cloud_agent.blueprints.nodes.checkpoint import CheckpointNode
 from cloud_agent.blueprints.nodes.implement_task import ImplementTaskNode
 from cloud_agent.blueprints.nodes.load_task import LoadTaskNode
 from cloud_agent.blueprints.nodes.prepare_context import PrepareContextNode
+from cloud_agent.blueprints.nodes.reproduce_issue import ReproduceIssueNode
 from cloud_agent.blueprints.nodes.seed_scripts import SeedScriptsNode
 from cloud_agent.db.store import StateStore
 from cloud_agent.observability.tracer import Tracer
@@ -26,6 +27,7 @@ def build_devloop(tracer: Tracer, state_store: StateStore) -> BlueprintEngine:
         "SEED_SCRIPTS": SeedScriptsNode(),
         "02_LOAD_TASK": LoadTaskNode(),
         "03_PREPARE_CONTEXT": PrepareContextNode(),
+        "REPRODUCE_ISSUE": ReproduceIssueNode(tracer=tracer),
         "04_IMPLEMENT_TASK": ImplementTaskNode(tracer=tracer),
         "05_CHECKPOINT": CheckpointNode(),
         "END": EndNode(),

@@ -86,6 +86,11 @@ class AgentState:
     implementation_done: bool = False
     task_status: str = "running"  # "running" | "done" | "failed" | "cancelled"
 
+    # Reproduction
+    repro_confirmed: bool = False
+    repro_output: str = ""
+    repro_env_path: str = "_repro_env"
+
     # Validation
     lint_status: str = "not_run"
     test_status: str = "not_run"

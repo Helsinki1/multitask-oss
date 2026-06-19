@@ -2,7 +2,8 @@ Done
 * memory compression after 20 conversation turns
 * prompt injection for likely relevant files
 * cut down tooling from 11 to 4: run_shell, read_file, write_file, replace_in_file (rely on LLM strength in reliable unix patterns)
-* agent is able to make custom python scripts to tighten devloop if it thinks it can condense 10+ bash lines
+* agent is able to make custom python scripts to tighten devloop if it thinks it can condense 10+ bash lines (node)
+* agent is encouraged to create mirror/twin minimal repo w files relevant to error, then reproduce identical error msg (node)
 
 Improvements
 1. better testing environment: every test that involves a non-trivial app should open Docker and run servers and requests scripts inside it

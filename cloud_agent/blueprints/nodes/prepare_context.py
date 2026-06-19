@@ -16,6 +16,6 @@ class PrepareContextNode(Node):
     def run(self, state: AgentState) -> NodeResult:
         cb = build_context_bundle(state.workspace_path, state.task_text)
         return NodeResult(
-            next_node="04_IMPLEMENT_TASK",
+            next_node="REPRODUCE_ISSUE",
             state_update={"context_bundle": cb},
         )
