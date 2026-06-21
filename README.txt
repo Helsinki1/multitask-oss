@@ -6,7 +6,7 @@ Done
 * agent is encouraged to create mirror/twin minimal repo w files relevant to error, then reproduce identical error msg (node)
 
 Improvements
-1. better testing environment: every test that involves a non-trivial app should open Docker and run servers and requests scripts inside it
+1. better testing environment: running tests / subagent sessions are all via "git worktree add -b" instead of a separate docker container that requires cold start
 3. multiple attempts + retry metadata: failed command, suspected cause, changed files, why prior fix failed, next constraint. Feed that into the next attempt and block exact repeated commands/patches unless justified
 
 4. give it self-evo abilities by letting it write Python scripts for itself mid-run that persist/compound during the run
@@ -21,6 +21,9 @@ Improvements
 
 (5, 1) 4, 6, 9, (8, 7), 3
 
+* walkie-talkie daemon for local multi-agent orchestration
+* failure handling: sharp decomposition test ("is the seam a data/interface boundary or shared mutable state?"), bounded retries (3) before escalating, "trust but verify" (re-run the child's checks yourself, never accept its self-report), and a blocked_on taxonomy (SECRET: / DECISION: / ACCESS: / EXTERNAL:) for batched human escalation.
+* if model stuck, best-of-N speculative attempts (spawn several workers on same blocked/difficult/ambiguous task)
 * Web search to look up documentation, history of related work, best practices, 
 * shouldnt there be preliminary descriptions for each tool call so the LLM can understand what each tool call does? Kind of like loading skill.md files?
 * 150-line capped reads for file discovery is a limitation
@@ -32,6 +35,7 @@ references
 - openharness https://github.com/HKUDS/OpenHarness
 - openautocoder/live-swe-agent
 - openautocoder/agentless
+- walkie-talkie (https://github.com/xyuzh/walkie-talkie)
 - claude code behavior: read/bash/edit (we could stick with this but direct it to Reproduce)
 
 clear product vision
