@@ -83,6 +83,20 @@ Custom scripts:
     - Usage: exact example invocation(s)\
 """
 
+LAYER_ADDITIVE_TASK = """\
+This is an additive task — you are writing new code, not fixing a bug.
+
+Deliverables (both required before you are done):
+1. Implementation: write the code that satisfies the task.
+2. Tests: write a test file (test_<name>.py alongside the code, or tests/test_<name>.py) \
+that exercises your implementation.
+   - Must be runnable with: python3 -m pytest <test_file> -v
+   - Cover the core behavior and at least one edge case.
+   - Tests must pass before you declare done.
+
+Do NOT write a _repro_test.py or _repro_env/ — those are for bug fixes only.\
+"""
+
 LAYER_REPRO_STRATEGY = """\
 Reproduce-first strategy:
 Apply when: fixing a bug, resolving an error, or fixing a failing test.
@@ -200,7 +214,11 @@ def build_implement_system(state: object, context_bundle: object) -> str:
             failure_output=verify_failure[:1500],
         ))
 
-    layers += [LAYER_REPRO_STRATEGY, LAYER_6_SAFETY, LAYER_7_IMPLEMENT]
+    if getattr(state, "task_type", "bug_fix") == "additive":
+        layers.append(LAYER_ADDITIVE_TASK)
+    else:
+        layers.append(LAYER_REPRO_STRATEGY)
+    layers += [LAYER_6_SAFETY, LAYER_7_IMPLEMENT]
 
     return "\n\n---\n\n".join(layers)
 

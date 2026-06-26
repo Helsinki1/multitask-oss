@@ -56,11 +56,16 @@ _CHECK_TOOL = {
 
 def _get_git_diff_summary(workspace: str) -> str:
     try:
-        result = subprocess.run(
+        diff = subprocess.run(
             ["git", "diff", "HEAD", "--stat"],
             capture_output=True, text=True, cwd=workspace,
-        )
-        return result.stdout.strip() or "(no diff)"
+        ).stdout.strip()
+        status = subprocess.run(
+            ["git", "status", "--short"],
+            capture_output=True, text=True, cwd=workspace,
+        ).stdout.strip()
+        combined = "\n".join(filter(None, [diff, status]))
+        return combined or "(no diff)"
     except Exception:
         return "(git unavailable)"
 

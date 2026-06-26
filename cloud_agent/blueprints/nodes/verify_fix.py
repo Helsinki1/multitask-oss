@@ -63,24 +63,27 @@ class VerifyFixNode(Node):
         ws = state.workspace_path
         failures: list[str] = []
 
-        # 1. Repro check — only runs if a repro script was produced by REPRODUCE_ISSUE
-        repro_script = _find_repro(ws)
-        if repro_script is not None:
-            rc, out = _run(f"python3 {repro_script}", ws)
-            passed = rc == 0
-            self.tracer.emit("verify.repro", {
-                "script": str(repro_script),
-                "exit_code": rc,
-                "passed": passed,
-            })
-            if not passed:
-                failures.append(
-                    f"Repro script still exits non-zero — fix did not take:\n"
-                    f"$ python3 {repro_script.relative_to(ws)}\n"
-                    f"{out[:1200]}"
-                )
+        # 1. Repro check — only for bug_fix tasks; additive tasks have no repro script
+        if state.task_type != "additive":
+            repro_script = _find_repro(ws)
+            if repro_script is not None:
+                rc, out = _run(f"python3 {repro_script}", ws)
+                passed = rc == 0
+                self.tracer.emit("verify.repro", {
+                    "script": str(repro_script),
+                    "exit_code": rc,
+                    "passed": passed,
+                })
+                if not passed:
+                    failures.append(
+                        f"Repro script still exits non-zero — fix did not take:\n"
+                        f"$ python3 {repro_script.relative_to(ws)}\n"
+                        f"{out[:1200]}"
+                    )
+            else:
+                self.tracer.emit("verify.repro", {"skipped": True, "reason": "no repro script found"})
         else:
-            self.tracer.emit("verify.repro", {"skipped": True, "reason": "no repro script found"})
+            self.tracer.emit("verify.repro", {"skipped": True, "reason": "additive task"})
 
         # 2. Test suite check — stop on first failing command
         test_commands = getattr(state.context_bundle, "build_and_test_commands", [])

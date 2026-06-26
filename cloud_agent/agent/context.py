@@ -119,7 +119,7 @@ def _detect_build_commands(workspace: str) -> list[str]:
     if not cmds:
         py_files = [f for f in os.listdir(workspace) if f.endswith(".py")]
         if py_files:
-            cmds.append("python -m pytest")
+            cmds.append("python3 -m pytest")
 
     return cmds
 
