@@ -14,6 +14,20 @@ _CLEAN_ENV: dict[str, str] = {
 }
 
 
+def run_cmd(cmd: str, cwd: str, timeout: int = 120) -> tuple[int, str]:
+    """Run a shell command; return (returncode, combined stdout+stderr)."""
+    try:
+        r = subprocess.run(
+            cmd, shell=True, capture_output=True, text=True,
+            cwd=cwd, timeout=timeout, env=_CLEAN_ENV,
+        )
+        return r.returncode, (r.stdout + "\n" + r.stderr).strip()
+    except subprocess.TimeoutExpired:
+        return 1, f"timed out after {timeout}s"
+    except Exception as exc:
+        return 1, f"error: {exc}"
+
+
 def run_shell_tool(args: dict, workspace: str) -> str:
     command = args["command"]
     rel_cwd = args.get("cwd", "")

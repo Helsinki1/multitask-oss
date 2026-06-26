@@ -98,6 +98,11 @@ class AgentState:
     verify_attempts: int = 0
     verify_failure_output: str = ""
 
+    # Eval mode (external benchmarks: SWE-bench etc.)
+    eval_mode: bool = False
+    fail_to_pass: list[str] = field(default_factory=list)
+    pass_to_pass: list[str] = field(default_factory=list)
+
     # Validation
     lint_status: str = "not_run"
     test_status: str = "not_run"

@@ -27,6 +27,25 @@ def main() -> None:
         action="store_true",
         help="Reset the repo to a clean state before running (git reset --hard + clean)",
     )
+    parser.add_argument(
+        "--eval-mode",
+        action="store_true",
+        help="Eval mode for external benchmarks (SWE-bench etc.): skips mirror-building, uses explicit test IDs",
+    )
+    parser.add_argument(
+        "--fail-to-pass",
+        nargs="+",
+        default=[],
+        metavar="TEST",
+        help="Test IDs that must fail before the fix and pass after (FAIL_TO_PASS)",
+    )
+    parser.add_argument(
+        "--pass-to-pass",
+        nargs="+",
+        default=[],
+        metavar="TEST",
+        help="Test IDs that must pass before and after the fix — regression guard (PASS_TO_PASS)",
+    )
     args = parser.parse_args()
 
     if not settings.openai_api_key:
@@ -51,6 +70,9 @@ def main() -> None:
         workspace_path=repo_path,
         task_text=args.task,
         task_source="cli",
+        eval_mode=args.eval_mode,
+        fail_to_pass=args.fail_to_pass,
+        pass_to_pass=args.pass_to_pass,
         budgets=BudgetState(
             max_llm_turns=args.max_turns,
             max_cost_usd=args.max_cost,

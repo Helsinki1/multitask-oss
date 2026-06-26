@@ -45,6 +45,12 @@ class PrepareContextNode(Node):
 
     def run(self, state: AgentState) -> NodeResult:
         cb = build_context_bundle(state.workspace_path, state.task_text)
+        if state.eval_mode:
+            # External benchmarks always provide failing tests; skip classifier.
+            return NodeResult(
+                next_node="REPRODUCE_ISSUE",
+                state_update={"context_bundle": cb, "task_type": "bug_fix"},
+            )
         task_type = _classify_task(state.task_text)
         next_node = "REPRODUCE_ISSUE" if task_type == "bug_fix" else "04_IMPLEMENT_TASK"
         return NodeResult(

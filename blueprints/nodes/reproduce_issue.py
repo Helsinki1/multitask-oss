@@ -8,12 +8,15 @@ The node enforces a hard gate: it will not advance to IMPLEMENT_TASK until:
 
 If two attempts fail to satisfy both conditions, the gate opens anyway with
 repro_confirmed=False so the run is never deadlocked, but the failure is logged.
+
+In eval_mode (SWE-bench etc.) the LLM subsession is skipped entirely: the harness
+has already applied the failing tests via test_patch, so this node just confirms
+they still fail before any source is touched.
 """
 
 from __future__ import annotations
 
 import re
-import subprocess
 import pathlib
 from typing import Optional
 
@@ -23,6 +26,7 @@ from cloud_agent.agent.subsession import SubsessionConfig, run_subsession
 from cloud_agent.config import settings
 from cloud_agent.observability.tracer import Tracer
 from cloud_agent.tools.registry import ToolRegistry, build_dev_toolset
+from cloud_agent.tools.shell import run_cmd
 
 _REPRO_SCRIPT = "_repro_env/run_repro.py"
 _REPRO_FALLBACK = "_repro_test.py"
@@ -61,9 +65,7 @@ Rules:
 def _extract_error_tokens(text: str) -> set[str]:
     """Pull exception class names and short post-colon phrases from text."""
     tokens: set[str] = set()
-    # Named exception/error/warning classes: e.g. AttributeError, ZeroDivisionError
     tokens.update(re.findall(r'\b(\w+(?:Error|Exception|Warning|Fault))\b', text))
-    # First significant words after "SomeError: ..." — captures the error message
     for match in re.finditer(r'\w+(?:Error|Exception)[:\s]+(.+?)(?:\n|$)', text):
         words = match.group(1).strip().split()[:4]
         if words:
@@ -75,15 +77,12 @@ def _repro_matches_issue(task_text: str, repro_output: str) -> bool:
     """Return True if repro_output shares key error identifiers with the task description."""
     issue_tokens = _extract_error_tokens(task_text)
     if not issue_tokens:
-        # No specific error identifiers found in the task — accept any non-zero exit
         return True
     repro_tokens = _extract_error_tokens(repro_output)
     repro_lower = repro_output.lower()
-    # Match on exception class name overlap
     exception_names = {t for t in issue_tokens if t[0].isupper()}
     if exception_names & repro_tokens:
         return True
-    # Match on key phrase presence (case-insensitive substring)
     for token in issue_tokens - exception_names:
         if token in repro_lower:
             return True
@@ -100,24 +99,6 @@ def _find_repro_script(workspace: str) -> Optional[pathlib.Path]:
     return None
 
 
-def _run_repro(script: pathlib.Path, workspace: str) -> tuple[int, str]:
-    """Execute the repro script and return (returncode, combined_output)."""
-    try:
-        r = subprocess.run(
-            ["python", str(script)],
-            capture_output=True,
-            text=True,
-            cwd=workspace,
-            timeout=60,
-        )
-        output = (r.stdout + "\n" + r.stderr).strip()
-        return r.returncode, output
-    except subprocess.TimeoutExpired:
-        return 1, "Repro script timed out after 60s"
-    except Exception as exc:
-        return 1, f"Error running repro: {exc}"
-
-
 def _verify(workspace: str, task_text: str) -> tuple[bool, str, str]:
     """Run the repro script and check it matches the issue.
 
@@ -127,7 +108,7 @@ def _verify(workspace: str, task_text: str) -> tuple[bool, str, str]:
     script = _find_repro_script(workspace)
     if script is None:
         return False, "", "No repro script found at _repro_env/run_repro.py or _repro_test.py"
-    rc, output = _run_repro(script, workspace)
+    rc, output = run_cmd(f"python3 {script}", workspace, timeout=60)
     if rc == 0:
         return False, str(script), f"Repro exited 0 (expected non-zero):\n{output}"
     if not _repro_matches_issue(task_text, output):
@@ -144,6 +125,9 @@ class ReproduceIssueNode(Node):
         self.tracer = tracer
 
     def run(self, state: AgentState) -> NodeResult:
+        if state.eval_mode:
+            return self._run_eval_mode(state)
+
         registry = ToolRegistry()
         build_dev_toolset(registry)
 
@@ -212,5 +196,43 @@ class ReproduceIssueNode(Node):
                 "repro_confirmed": repro_confirmed,
                 "repro_output": output,
                 "repro_env_path": script_path,
+            },
+        )
+
+    def _run_eval_mode(self, state: AgentState) -> NodeResult:
+        """Deterministic repro confirmation for eval_mode: run FAIL_TO_PASS tests, expect non-zero."""
+        if not state.fail_to_pass:
+            self.tracer.emit("repro.eval_mode", {"skipped": True, "reason": "no fail_to_pass tests"})
+            return NodeResult(
+                next_node="04_IMPLEMENT_TASK",
+                state_update={"repro_confirmed": False, "repro_output": "no FAIL_TO_PASS tests specified"},
+            )
+
+        test_ids = " ".join(state.fail_to_pass)
+        rc, output = run_cmd(
+            f"python3 -m pytest {test_ids} -x --tb=short",
+            state.workspace_path,
+            timeout=120,
+        )
+        confirmed = rc != 0
+
+        self.tracer.emit("repro.eval_mode", {
+            "fail_to_pass": state.fail_to_pass,
+            "exit_code": rc,
+            "confirmed": confirmed,
+            "output_preview": output[:300],
+        })
+
+        if not confirmed:
+            self.tracer.emit("repro.unconfirmed", {
+                "reason": "FAIL_TO_PASS tests already pass — check that test_patch was applied",
+                "output": output[:300],
+            })
+
+        return NodeResult(
+            next_node="04_IMPLEMENT_TASK",
+            state_update={
+                "repro_confirmed": confirmed,
+                "repro_output": output,
             },
         )
