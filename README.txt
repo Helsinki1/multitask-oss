@@ -7,6 +7,7 @@ Done
 * set temperature=0
 * environmental noise suppression: PAGER=cat, MANPAGER=cat, TQDM_DISABLE=1, PIP_PROGRESS_BAR=off -- eliminates the garbage (progress bars, pagers, ANSI codes) that eats context tokens and confuses models
 * force agent to make one bash exec per turn
+* model-agnostic routing: cheap models for file discovery, strong models for patch generation
 
 Improvements
 1. better testing environment: running tests / subagent sessions are all via "git worktree add -b" instead of a separate docker container that requires cold start
@@ -18,7 +19,7 @@ Improvements
 
 
 9. linear ReAct history: dead simple, every turn appends to the same message list. No tree search, no branching, no subsession splits. The model just keeps going
-10. model-agnostic routing: cheap models for file discovery, strong models for patch generation
+
 
 - in live-swe-agent, are custom scripts / reproducing optional or pipelined?
 
