@@ -168,6 +168,7 @@ def run_subsession(
         )
         if config.tools_schema:
             api_kwargs["tools"] = config.tools_schema
+            api_kwargs["parallel_tool_calls"] = False
 
         response = None
         max_attempts = 3

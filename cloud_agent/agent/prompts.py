@@ -13,7 +13,8 @@ Core constraints:
 - Do not push, deploy, merge, or publish anything. The pipeline handles that.
 - Report uncertainty and failures honestly. Do not claim success without evidence.
 - Do not modify files unrelated to the task.
-- Progress updates should be brief. Do not narrate your thinking — act.\
+- Progress updates should be brief. Do not narrate your thinking — act.
+- Make exactly one tool call per turn. Do not batch multiple tool calls in a single response.\
 """
 
 LAYER_2_ENV = """\
