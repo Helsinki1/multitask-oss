@@ -4,6 +4,7 @@ Done
 * cut down tooling from 11 to 4: run_shell, read_file, write_file, replace_in_file (rely on LLM strength in reliable unix patterns)
 * agent is able to make custom python scripts to tighten devloop if it thinks it can condense 10+ bash lines (node)
 * agent is encouraged to create mirror/twin minimal repo w files relevant to error, then reproduce identical error msg (node)
+* set temperature=0
 
 Improvements
 1. better testing environment: running tests / subagent sessions are all via "git worktree add -b" instead of a separate docker container that requires cold start
@@ -13,7 +14,7 @@ Improvements
 5. reproducibility pipeline (not optional): Analyze codebase, write a reproduction script that fails, edit source code to fix it, verify the repro now passes, test edge cases, implement on actual repo
 6. force agent to make one bash exec per turn
 7. environmental noise suppression: PAGER=cat, MANPAGER=cat, TQDM_DISABLE=1, PIP_PROGRESS_BAR=off -- eliminates the garbage (progress bars, pagers, ANSI codes) that eats context tokens and confuses models
-8. set temperature=0
+
 9. linear ReAct history: dead simple, every turn appends to the same message list. No tree search, no branching, no subsession splits. The model just keeps going
 10. model-agnostic routing: cheap models for file discovery, strong models for patch generation
 
@@ -24,6 +25,7 @@ Improvements
 * walkie-talkie daemon for local multi-agent orchestration
 * failure handling: sharp decomposition test ("is the seam a data/interface boundary or shared mutable state?"), bounded retries (3) before escalating, "trust but verify" (re-run the child's checks yourself, never accept its self-report), and a blocked_on taxonomy (SECRET: / DECISION: / ACCESS: / EXTERNAL:) for batched human escalation.
 * if model stuck, best-of-N speculative attempts (spawn several workers on same blocked/difficult/ambiguous task)
+* orphan agent reconcilliation on daemon restart
 * Web search to look up documentation, history of related work, best practices, 
 * shouldnt there be preliminary descriptions for each tool call so the LLM can understand what each tool call does? Kind of like loading skill.md files?
 * 150-line capped reads for file discovery is a limitation

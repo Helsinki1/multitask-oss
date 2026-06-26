@@ -163,6 +163,7 @@ def run_subsession(
         api_kwargs: dict = dict(
             model=current_model,
             messages=messages,
+            temperature=0,
             **_token_limit_kwargs(current_model, config.max_tokens),
         )
         if config.tools_schema:
