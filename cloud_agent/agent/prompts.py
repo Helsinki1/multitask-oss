@@ -101,6 +101,17 @@ Your implementation is only complete when the repro passes AND the test suite pa
 Do not skip the repro step — it is the primary evidence that the fix is correct.\
 """
 
+LAYER_VERIFY_FAILURE_TEMPLATE = """\
+VERIFICATION FAILED (attempt {attempt} of 3) — your previous fix did not pass:
+
+{failure_output}
+
+Do not repeat the same approach that failed. You must make the fix work:
+  1. The repro script must exit 0 (bug confirmed fixed)
+  2. The full test suite must pass (no regressions)
+Run both before declaring done.\
+"""
+
 LAYER_REPRO_CONTEXT_TEMPLATE = """\
 A reproduction script _repro_test.py was written and currently FAILS:
 ---
@@ -180,6 +191,14 @@ def build_implement_system(state: object, context_bundle: object) -> str:
     repro_output = getattr(state, "repro_output", "")
     if getattr(state, "repro_confirmed", False) and repro_output:
         layers.append(LAYER_REPRO_CONTEXT_TEMPLATE.format(repro_output=repro_output[:800]))
+
+    verify_failure = getattr(state, "verify_failure_output", "")
+    verify_attempts = getattr(state, "verify_attempts", 0)
+    if verify_failure and verify_attempts > 0:
+        layers.append(LAYER_VERIFY_FAILURE_TEMPLATE.format(
+            attempt=verify_attempts,
+            failure_output=verify_failure[:1500],
+        ))
 
     layers += [LAYER_REPRO_STRATEGY, LAYER_6_SAFETY, LAYER_7_IMPLEMENT]
 

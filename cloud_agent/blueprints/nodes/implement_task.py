@@ -62,7 +62,7 @@ class ImplementTaskNode(Node):
         }
 
         return NodeResult(
-            next_node="05_CHECKPOINT",
+            next_node="VERIFY_FIX",
             state_update=state_update,
             status="ok" if result.status == "done" else "warning",
         )
