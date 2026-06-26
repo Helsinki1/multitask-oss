@@ -86,6 +86,9 @@ class AgentState:
     implementation_done: bool = False
     task_status: str = "running"  # "running" | "done" | "failed" | "cancelled"
 
+    # Task classification
+    task_type: str = "bug_fix"  # "bug_fix" | "additive" — set by PREPARE_CONTEXT
+
     # Reproduction
     repro_confirmed: bool = False
     repro_output: str = ""
