@@ -9,6 +9,7 @@ Done
 * force agent to make one bash exec per turn
 * model-agnostic routing: cheap models for file discovery, strong models for patch generation
 * reproducibility pipeline (not optional): Analyze codebase, write a reproduction script that fails, edit source code to fix it, verify the repro now passes, test edge cases, implement on actual repo
+* added a simple classifier for "bug fix" vs "additive" tasks --- if additive task fails, it goes into bug fix mode but without the reproduce-issue steps
 
 Improvements
 1. better testing environment: running tests / subagent sessions are all via "git worktree add -b" instead of a separate docker container that requires cold start
