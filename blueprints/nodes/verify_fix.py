@@ -15,10 +15,10 @@ from __future__ import annotations
 
 import pathlib
 
-from cloud_agent.agent.runtime import Node, NodeResult
-from cloud_agent.agent.state import AgentState
-from cloud_agent.observability.tracer import Tracer
-from cloud_agent.tools.shell import run_cmd
+from agent.runtime import Node, NodeResult
+from agent.state import AgentState
+from observability.tracer import Tracer
+from tools.shell import run_cmd
 
 MAX_VERIFY_ATTEMPTS = 3
 _REPRO_CANDIDATES = ("_repro_env/run_repro.py", "_repro_test.py")

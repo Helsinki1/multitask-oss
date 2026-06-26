@@ -5,8 +5,8 @@ Commits implementation changes before deterministic steps mutate files.
 
 import subprocess
 
-from cloud_agent.agent.runtime import Node, NodeResult
-from cloud_agent.agent.state import AgentState
+from agent.runtime import Node, NodeResult
+from agent.state import AgentState
 
 
 def _git(args: list[str], cwd: str) -> tuple[int, str, str]:

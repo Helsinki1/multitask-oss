@@ -6,8 +6,8 @@ Verifies workspace safety, captures initial SHA, ensures we're on a working bran
 import re
 import subprocess
 
-from cloud_agent.agent.runtime import Node, NodeResult
-from cloud_agent.agent.state import AgentState
+from agent.runtime import Node, NodeResult
+from agent.state import AgentState
 from cloud_agent.config import settings
 
 

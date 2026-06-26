@@ -8,20 +8,20 @@ from dataclasses import dataclass, field
 
 import openai
 
-from cloud_agent.agent.budgets import BudgetExhausted, check_budget, estimate_cost
-from cloud_agent.agent.completion_checker import IsDoneOutput, check_is_done
-from cloud_agent.agent.escalation import (
+from agent.budgets import BudgetExhausted, check_budget, estimate_cost
+from agent.completion_checker import IsDoneOutput, check_is_done
+from agent.escalation import (
     EscalationConfig,
     EscalationMetrics,
     build_escalation_message,
     record_tool_result,
     should_escalate,
 )
-from cloud_agent.agent.prompts import build_nudge
-from cloud_agent.agent.state import AgentState
+from agent.prompts import build_nudge
+from agent.state import AgentState
 from cloud_agent.config import settings
-from cloud_agent.observability.tracer import Tracer
-from cloud_agent.tools.registry import ToolRegistry
+from observability.tracer import Tracer
+from tools.registry import ToolRegistry
 
 
 @dataclass

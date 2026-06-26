@@ -6,7 +6,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import Optional
 
-from cloud_agent.agent.state import AgentState
+from agent.state import AgentState
 from cloud_agent.config import settings
 
 

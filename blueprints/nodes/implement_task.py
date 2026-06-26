@@ -3,14 +3,14 @@
 The main implementation loop. Model inspects, edits, runs commands.
 """
 
-from cloud_agent.agent.escalation import EscalationConfig
-from cloud_agent.agent.prompts import build_implement_human, build_implement_system
-from cloud_agent.agent.runtime import Node, NodeResult
-from cloud_agent.agent.state import AgentState
-from cloud_agent.agent.subsession import SubsessionConfig, run_subsession
+from agent.escalation import EscalationConfig
+from agent.prompts import build_implement_human, build_implement_system
+from agent.runtime import Node, NodeResult
+from agent.state import AgentState
+from agent.subsession import SubsessionConfig, run_subsession
 from cloud_agent.config import settings
-from cloud_agent.observability.tracer import Tracer
-from cloud_agent.tools.registry import ToolRegistry, build_dev_toolset
+from observability.tracer import Tracer
+from tools.registry import ToolRegistry, build_dev_toolset
 
 
 class ImplementTaskNode(Node):

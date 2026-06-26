@@ -8,11 +8,11 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-from cloud_agent.agent.state import AgentState, BudgetState
-from cloud_agent.blueprints.devloop import build_devloop
+from agent.state import AgentState, BudgetState
+from blueprints.devloop import build_devloop
 from cloud_agent.config import settings
-from cloud_agent.db.store import StateStore
-from cloud_agent.observability.tracer import Tracer
+from db.store import StateStore
+from observability.tracer import Tracer
 
 
 def main() -> None:

@@ -2,9 +2,9 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
-from cloud_agent.agent.state import AgentState
-from cloud_agent.agent.subsession import SubsessionResult
-from cloud_agent.blueprints.nodes.implement_task import ImplementTaskNode
+from agent.state import AgentState
+from agent.subsession import SubsessionResult
+from blueprints.nodes.implement_task import ImplementTaskNode
 
 
 def test_implement_task_failure_marks_task_failed():
@@ -12,7 +12,7 @@ def test_implement_task_failure_marks_task_failed():
     updated = state.apply_update({"budgets": state.budgets})
     node = ImplementTaskNode(tracer=MagicMock())
 
-    with patch("cloud_agent.blueprints.nodes.implement_task.run_subsession") as run:
+    with patch("blueprints.nodes.implement_task.run_subsession") as run:
         run.return_value = (SubsessionResult(status="error"), updated)
         result = node.run(state)
 
@@ -27,7 +27,7 @@ def test_implement_task_success_leaves_task_running_until_engine_finalizes():
     updated = state.apply_update({"budgets": state.budgets})
     node = ImplementTaskNode(tracer=MagicMock())
 
-    with patch("cloud_agent.blueprints.nodes.implement_task.run_subsession") as run:
+    with patch("blueprints.nodes.implement_task.run_subsession") as run:
         run.return_value = (SubsessionResult(status="done"), updated)
         result = node.run(state)
 

@@ -8,8 +8,8 @@ from dataclasses import dataclass, field
 
 import openai
 
-from cloud_agent.agent.prompts import IS_DONE_SYSTEM
-from cloud_agent.agent.state import AgentState
+from agent.prompts import IS_DONE_SYSTEM
+from agent.state import AgentState
 from cloud_agent.config import settings
 
 

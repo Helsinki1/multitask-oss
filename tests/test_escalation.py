@@ -7,7 +7,7 @@ from unittest.mock import MagicMock, call, patch
 
 import pytest
 
-from cloud_agent.agent.escalation import (
+from agent.escalation import (
     EscalationConfig,
     EscalationMetrics,
     _is_blocked_text,
@@ -16,8 +16,8 @@ from cloud_agent.agent.escalation import (
     record_tool_result,
     should_escalate,
 )
-from cloud_agent.agent.state import AgentState, BudgetState
-from cloud_agent.agent.subsession import _token_limit_kwargs
+from agent.state import AgentState, BudgetState
+from agent.subsession import _token_limit_kwargs
 
 
 # ---------------------------------------------------------------------------
@@ -188,9 +188,9 @@ class TestEscalationTraceEvent:
         return response
 
     def test_escalation_event_emitted_after_completion_check_failures(self):
-        from cloud_agent.agent.subsession import SubsessionConfig, run_subsession
-        from cloud_agent.agent.escalation import EscalationConfig
-        from cloud_agent.tools.registry import ToolRegistry
+        from agent.subsession import SubsessionConfig, run_subsession
+        from agent.escalation import EscalationConfig
+        from tools.registry import ToolRegistry
 
         cfg = EscalationConfig(
             default_model="gpt-4o-mini",
@@ -225,8 +225,8 @@ class TestEscalationTraceEvent:
         text_response = self._make_text_response("Analyzing the codebase.")
 
         with (
-            patch("cloud_agent.agent.subsession.openai.OpenAI") as mock_openai_cls,
-            patch("cloud_agent.agent.subsession.check_is_done") as mock_done,
+            patch("agent.subsession.openai.OpenAI") as mock_openai_cls,
+            patch("agent.subsession.check_is_done") as mock_done,
         ):
             mock_client = MagicMock()
             mock_openai_cls.return_value = mock_client
@@ -250,9 +250,9 @@ class TestEscalationTraceEvent:
         assert "cost_so_far" in payload
 
     def test_escalation_message_injected_into_conversation(self):
-        from cloud_agent.agent.subsession import SubsessionConfig, run_subsession
-        from cloud_agent.agent.escalation import EscalationConfig
-        from cloud_agent.tools.registry import ToolRegistry
+        from agent.subsession import SubsessionConfig, run_subsession
+        from agent.escalation import EscalationConfig
+        from tools.registry import ToolRegistry
 
         cfg = EscalationConfig(
             default_model="gpt-4o-mini",
@@ -277,8 +277,8 @@ class TestEscalationTraceEvent:
         text_response = self._make_text_response("thinking...")
 
         with (
-            patch("cloud_agent.agent.subsession.openai.OpenAI") as mock_openai_cls,
-            patch("cloud_agent.agent.subsession.check_is_done") as mock_done,
+            patch("agent.subsession.openai.OpenAI") as mock_openai_cls,
+            patch("agent.subsession.check_is_done") as mock_done,
         ):
             mock_client = MagicMock()
             mock_openai_cls.return_value = mock_client
@@ -324,9 +324,9 @@ class TestMaxEscalations:
 
     def test_model_switches_exactly_once_in_subsession(self):
         """Integration: with max_escalations=1, model switches once and stays switched."""
-        from cloud_agent.agent.subsession import SubsessionConfig, run_subsession
-        from cloud_agent.agent.escalation import EscalationConfig
-        from cloud_agent.tools.registry import ToolRegistry
+        from agent.subsession import SubsessionConfig, run_subsession
+        from agent.escalation import EscalationConfig
+        from tools.registry import ToolRegistry
 
         cfg = EscalationConfig(
             default_model="gpt-4o-mini",
@@ -360,8 +360,8 @@ class TestMaxEscalations:
         response.usage.completion_tokens = 50
 
         with (
-            patch("cloud_agent.agent.subsession.openai.OpenAI") as mock_openai_cls,
-            patch("cloud_agent.agent.subsession.check_is_done") as mock_done,
+            patch("agent.subsession.openai.OpenAI") as mock_openai_cls,
+            patch("agent.subsession.check_is_done") as mock_done,
         ):
             mock_client = MagicMock()
             mock_openai_cls.return_value = mock_client

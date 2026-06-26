@@ -2,9 +2,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from cloud_agent.agent.context import build_context_bundle, fetch_remote_agents_files
-from cloud_agent.agent.prompts import build_implement_human
-from cloud_agent.agent.state import AgentState, ContextBundle
+from agent.context import build_context_bundle, fetch_remote_agents_files
+from agent.prompts import build_implement_human
+from agent.state import AgentState, ContextBundle
 from cloud_agent.config import Settings
 
 
@@ -16,7 +16,7 @@ def test_build_context_bundle_preloads_task_adjacent_files(tmp_path, monkeypatch
     unrelated_file = tmp_path / "README.md"
     unrelated_file.write_text("hello", encoding="utf-8")
 
-    monkeypatch.setattr("cloud_agent.agent.context.fetch_remote_agents_files", lambda *_: [])
+    monkeypatch.setattr("agent.context.fetch_remote_agents_files", lambda *_: [])
 
     cb = build_context_bundle(
         str(tmp_path),
@@ -76,7 +76,7 @@ def test_fetch_remote_agents_files_uses_github_raw_url(monkeypatch):
         calls.append(req.full_url)
         return FakeResponse()
 
-    monkeypatch.setattr("cloud_agent.agent.context._run_git", fake_run_git)
+    monkeypatch.setattr("agent.context._run_git", fake_run_git)
     monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
 
     contents = fetch_remote_agents_files("task", "/tmp/workspace")

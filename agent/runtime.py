@@ -5,9 +5,9 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
-from cloud_agent.agent.state import AgentState, NodeError
-from cloud_agent.db.store import StateStore
-from cloud_agent.observability.tracer import Tracer
+from agent.state import AgentState, NodeError
+from db.store import StateStore
+from observability.tracer import Tracer
 
 
 def _now_iso() -> str:

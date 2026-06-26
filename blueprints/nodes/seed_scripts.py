@@ -8,8 +8,8 @@ Also ensures _agent_scripts/ is in .gitignore so it never leaks into the patch.
 import os
 import pathlib
 
-from cloud_agent.agent.runtime import Node, NodeResult
-from cloud_agent.agent.state import AgentState
+from agent.runtime import Node, NodeResult
+from agent.state import AgentState
 
 _DOCKER_RUN_PY = '''\
 #!/usr/bin/env python3

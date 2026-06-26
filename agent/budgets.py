@@ -1,6 +1,6 @@
 """Budget enforcement. Raises BudgetExhausted when limits are hit."""
 
-from cloud_agent.agent.state import AgentState
+from agent.state import AgentState
 
 
 class BudgetExhausted(Exception):

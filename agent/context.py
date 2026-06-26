@@ -6,7 +6,7 @@ import subprocess
 import urllib.error
 import urllib.request
 
-from cloud_agent.agent.state import ContextBundle
+from agent.state import ContextBundle
 
 
 _RULE_FILES = ["AGENTS.md", "CLAUDE.md", ".cursor/rules", ".github/copilot-instructions.md"]
@@ -127,7 +127,7 @@ def _detect_build_commands(workspace: str) -> list[str]:
 
 
 def _generate_repo_map(workspace: str) -> str:
-    from cloud_agent.tools.search import get_repo_map_tool
+    from tools.search import get_repo_map_tool
     try:
         return get_repo_map_tool({}, workspace)
     except Exception:

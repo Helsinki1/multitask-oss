@@ -5,8 +5,8 @@ Normalizes task text and detects repo visibility.
 
 import os
 
-from cloud_agent.agent.runtime import Node, NodeResult
-from cloud_agent.agent.state import AgentState
+from agent.runtime import Node, NodeResult
+from agent.state import AgentState
 
 
 class LoadTaskNode(Node):

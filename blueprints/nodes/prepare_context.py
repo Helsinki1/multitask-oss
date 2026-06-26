@@ -6,9 +6,9 @@ can take the right path (bug_fix → REPRODUCE_ISSUE, additive → IMPLEMENT_TAS
 
 import openai
 
-from cloud_agent.agent.context import build_context_bundle
-from cloud_agent.agent.runtime import Node, NodeResult
-from cloud_agent.agent.state import AgentState
+from agent.context import build_context_bundle
+from agent.runtime import Node, NodeResult
+from agent.state import AgentState
 from cloud_agent.config import settings
 
 _CLASSIFY_SYSTEM = (

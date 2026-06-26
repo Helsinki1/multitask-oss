@@ -139,11 +139,11 @@ def _install_env(work_dir: str) -> None:
 
 def run_agent(instance: dict, work_dir: str, max_turns: int, max_cost: float):
     """Build eval_mode AgentState and run the devloop engine."""
-    from cloud_agent.agent.state import AgentState, BudgetState
-    from cloud_agent.blueprints.devloop import build_devloop
+    from agent.state import AgentState, BudgetState
+    from blueprints.devloop import build_devloop
     from cloud_agent.config import settings
-    from cloud_agent.db.store import StateStore
-    from cloud_agent.observability.tracer import Tracer
+    from db.store import StateStore
+    from observability.tracer import Tracer
 
     fail_to_pass = _parse_test_ids(instance["FAIL_TO_PASS"])
     pass_to_pass = _parse_test_ids(instance["PASS_TO_PASS"])

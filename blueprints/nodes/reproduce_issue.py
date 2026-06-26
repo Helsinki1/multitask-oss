@@ -20,13 +20,13 @@ import re
 import pathlib
 from typing import Optional
 
-from cloud_agent.agent.runtime import Node, NodeResult
-from cloud_agent.agent.state import AgentState
-from cloud_agent.agent.subsession import SubsessionConfig, run_subsession
+from agent.runtime import Node, NodeResult
+from agent.state import AgentState
+from agent.subsession import SubsessionConfig, run_subsession
 from cloud_agent.config import settings
-from cloud_agent.observability.tracer import Tracer
-from cloud_agent.tools.registry import ToolRegistry, build_dev_toolset
-from cloud_agent.tools.shell import run_cmd
+from observability.tracer import Tracer
+from tools.registry import ToolRegistry, build_dev_toolset
+from tools.shell import run_cmd
 
 _REPRO_SCRIPT = "_repro_env/run_repro.py"
 _REPRO_FALLBACK = "_repro_test.py"

@@ -53,12 +53,12 @@ def build_dev_toolset(registry: ToolRegistry) -> None:
 
     Everything else (git, search, list, tests) is done via run_shell bash commands.
     """
-    from cloud_agent.tools.filesystem import (
+    from tools.filesystem import (
         read_file_tool,
         replace_in_file_tool,
         write_file_tool,
     )
-    from cloud_agent.tools.shell import run_shell_tool
+    from tools.shell import run_shell_tool
 
     registry.register(ToolSpec(
         name="run_shell",

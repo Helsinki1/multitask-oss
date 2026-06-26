@@ -20,7 +20,7 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["cloud_agent*"]
+include = ["cloud_agent*", "agent*", "blueprints*", "db*", "observability*", "tools*"]
 
 [tool.ruff]
 line-length = 100

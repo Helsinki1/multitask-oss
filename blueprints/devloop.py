@@ -1,17 +1,17 @@
 """Devloop blueprint: assembles the node graph for Phase 1 (nodes 01-05)."""
 
-from cloud_agent.agent.runtime import BlueprintEngine, Node, NodeResult
-from cloud_agent.agent.state import AgentState
-from cloud_agent.blueprints.nodes.check_branch import CheckBranchNode
-from cloud_agent.blueprints.nodes.checkpoint import CheckpointNode
-from cloud_agent.blueprints.nodes.implement_task import ImplementTaskNode
-from cloud_agent.blueprints.nodes.load_task import LoadTaskNode
-from cloud_agent.blueprints.nodes.prepare_context import PrepareContextNode
-from cloud_agent.blueprints.nodes.reproduce_issue import ReproduceIssueNode
-from cloud_agent.blueprints.nodes.seed_scripts import SeedScriptsNode
-from cloud_agent.blueprints.nodes.verify_fix import VerifyFixNode
-from cloud_agent.db.store import StateStore
-from cloud_agent.observability.tracer import Tracer
+from agent.runtime import BlueprintEngine, Node, NodeResult
+from agent.state import AgentState
+from blueprints.nodes.check_branch import CheckBranchNode
+from blueprints.nodes.checkpoint import CheckpointNode
+from blueprints.nodes.implement_task import ImplementTaskNode
+from blueprints.nodes.load_task import LoadTaskNode
+from blueprints.nodes.prepare_context import PrepareContextNode
+from blueprints.nodes.reproduce_issue import ReproduceIssueNode
+from blueprints.nodes.seed_scripts import SeedScriptsNode
+from blueprints.nodes.verify_fix import VerifyFixNode
+from db.store import StateStore
+from observability.tracer import Tracer
 
 
 class EndNode(Node):
