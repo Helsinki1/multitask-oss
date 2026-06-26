@@ -91,6 +91,10 @@ class AgentState:
     repro_output: str = ""
     repro_env_path: str = "_repro_env"
 
+    # Verification (post-implementation)
+    verify_attempts: int = 0
+    verify_failure_output: str = ""
+
     # Validation
     lint_status: str = "not_run"
     test_status: str = "not_run"
