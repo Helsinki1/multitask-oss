@@ -3,6 +3,16 @@
 import os
 import subprocess
 
+_CLEAN_ENV: dict[str, str] = {
+    **os.environ,
+    "PAGER": "cat",
+    "MANPAGER": "cat",
+    "TQDM_DISABLE": "1",
+    "PIP_PROGRESS_BAR": "off",
+    "NO_COLOR": "1",
+    "PYTHONDONTWRITEBYTECODE": "1",
+}
+
 
 def run_shell_tool(args: dict, workspace: str) -> str:
     command = args["command"]
@@ -21,6 +31,7 @@ def run_shell_tool(args: dict, workspace: str) -> str:
             text=True,
             cwd=cwd,
             timeout=timeout,
+            env=_CLEAN_ENV,
         )
     except subprocess.TimeoutExpired:
         return f"Command timed out after {timeout}s: {command}"

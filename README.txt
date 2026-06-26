@@ -5,6 +5,7 @@ Done
 * agent is able to make custom python scripts to tighten devloop if it thinks it can condense 10+ bash lines (node)
 * agent is encouraged to create mirror/twin minimal repo w files relevant to error, then reproduce identical error msg (node)
 * set temperature=0
+* environmental noise suppression: PAGER=cat, MANPAGER=cat, TQDM_DISABLE=1, PIP_PROGRESS_BAR=off -- eliminates the garbage (progress bars, pagers, ANSI codes) that eats context tokens and confuses models
 
 Improvements
 1. better testing environment: running tests / subagent sessions are all via "git worktree add -b" instead of a separate docker container that requires cold start
@@ -13,7 +14,7 @@ Improvements
 4. give it self-evo abilities by letting it write Python scripts for itself mid-run that persist/compound during the run
 5. reproducibility pipeline (not optional): Analyze codebase, write a reproduction script that fails, edit source code to fix it, verify the repro now passes, test edge cases, implement on actual repo
 6. force agent to make one bash exec per turn
-7. environmental noise suppression: PAGER=cat, MANPAGER=cat, TQDM_DISABLE=1, PIP_PROGRESS_BAR=off -- eliminates the garbage (progress bars, pagers, ANSI codes) that eats context tokens and confuses models
+
 
 9. linear ReAct history: dead simple, every turn appends to the same message list. No tree search, no branching, no subsession splits. The model just keeps going
 10. model-agnostic routing: cheap models for file discovery, strong models for patch generation
