@@ -17,7 +17,7 @@ from agent.state import AgentState, TestCase, TestToDoList
 from observability.tracer import Tracer
 from tools.shell import run_cmd
 
-MAX_VERIFY_ATTEMPTS = 3
+MAX_VERIFY_ATTEMPTS = 5
 _TEST_TIMEOUT = 300
 
 

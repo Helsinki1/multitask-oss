@@ -69,3 +69,6 @@ the coding agent is still failing in almost the same identicaly way. i think we 
 
 right: traceback-driven context gathering, diff retry loops for diff failure types (f2p p2p-regression), (for additive) algorithmic dep-graph context gathering as a tool call, structured to-do list (deterministic by test case, NOT llm's choice)
 wrong: letting llm write desired behavior w/o strict verifiable contracts (test-step will write trivial tests), CAREFULLY frame completed work when moving onto future tasks, 
+
+- each retry can get very repetitive (same file rereads, same patches/tests ran, same reasoning results...)
+- 3 retry + verify attempts ARENT enough, swe-bench cases that regress need a lot more reasoning steps

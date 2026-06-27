@@ -36,6 +36,7 @@ image = (
         "pydantic>=2.0",
         "python-dotenv>=1.0",
         "datasets",
+        "pytest",
     ])
     .run_commands(
         "git config --global user.email 'agent@swe-bench'",
