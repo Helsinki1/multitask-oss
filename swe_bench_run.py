@@ -107,7 +107,18 @@ def setup_workspace(instance: dict, work_dir: str) -> None:
             )
         finally:
             patch_path.unlink(missing_ok=True)
-        print("  applied test_patch")
+        # Commit so the workspace is clean when the agent's CheckBranchNode runs
+        subprocess.run(["git", "add", "-A"], cwd=work_dir, check=True)
+        subprocess.run(
+            [
+                "git", "-c", "user.email=harness@swe-bench",
+                "-c", "user.name=SWE-bench Harness",
+                "commit", "-m", "test_patch",
+            ],
+            cwd=work_dir,
+            check=True,
+        )
+        print("  applied and committed test_patch")
 
     _install_env(work_dir)
 
