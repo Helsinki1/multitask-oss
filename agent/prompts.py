@@ -62,11 +62,14 @@ Trace the traceback to its root cause, then make the minimal correct change.
 When you are satisfied with your changes, produce a final text summary of:
   1. Which files you changed and why
   2. The root cause you fixed
-Then stop — do not run tests yourself. The harness verifies your fix.\
+Then stop. The harness verifies your fix.
+
+If you want to spot-check before stopping, run ONLY the specific test IDs listed above —
+never a directory, module, or the full suite. Unrelated failures will mislead you.\
 """
 
 _BUGFIX_RETRY_F2P = """\
-RETRY (attempt {attempt} of 3) — fail_to_pass tests are still failing.
+RETRY (attempt {attempt} of 5) — fail_to_pass tests are still failing.
 
 The following tests did not pass after your last implementation:
 {f2p_failing_list}
@@ -79,7 +82,7 @@ Fix it — the harness will verify.\
 """
 
 _BUGFIX_RETRY_P2P = """\
-RETRY (attempt {attempt} of 3) — your fix caused pass_to_pass regressions.
+RETRY (attempt {attempt} of 5) — your fix caused pass_to_pass regressions.
 
 Regressions (tests that were passing before your change, now failing):
 {p2p_failing_list}
