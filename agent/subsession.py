@@ -1,4 +1,9 @@
-"""LLM subsession: the core agent loop (tool-call cycle + done-checking)."""
+"""LLM subsession: the agent tool-call loop.
+
+Runs until the model produces a text response (no tool calls) or budget is exhausted.
+Verification of correctness is handled deterministically by the VERIFY node — this
+loop has no completion checker, no self-assessment, no nudging.
+"""
 
 from __future__ import annotations
 
@@ -9,15 +14,6 @@ from dataclasses import dataclass, field
 import openai
 
 from agent.budgets import BudgetExhausted, check_budget, estimate_cost
-from agent.completion_checker import IsDoneOutput, check_is_done
-from agent.escalation import (
-    EscalationConfig,
-    EscalationMetrics,
-    build_escalation_message,
-    record_tool_result,
-    should_escalate,
-)
-from agent.prompts import build_nudge
 from agent.state import AgentState
 from cloud_agent.config import settings
 from observability.tracer import Tracer
@@ -34,7 +30,6 @@ class SubsessionConfig:
     max_turns: int = 100
     max_wall_seconds: int = 7200
     max_tokens: int = 8192
-    escalation_config: EscalationConfig | None = None
 
 
 @dataclass
@@ -51,20 +46,13 @@ _KEEP_RECENT_TURNS = 6
 
 
 def _token_limit_kwargs(model: str, max_tokens: int) -> dict[str, int]:
-    """Return the token limit parameter supported by the selected model family."""
     if model.startswith("gpt-5") or model.startswith("codex-"):
         return {"max_completion_tokens": max_tokens}
     return {"max_tokens": max_tokens}
 
 
-def _compress_history(messages: list[dict], keep_turns: int = 6) -> None:
-    """Truncate tool message content for turns older than keep_turns. Mutates in place.
-
-    Walks backward counting assistant-with-tool-calls as turn boundaries.
-    Tool messages beyond keep_turns are collapsed to 120 chars so the model
-    retains a breadcrumb of what ran without burning context on stale output.
-    The tool_call_id chain is preserved so OpenAI's message structure stays valid.
-    """
+def _compress_history(messages: list[dict], keep_turns: int = _KEEP_RECENT_TURNS) -> None:
+    """Truncate tool message content beyond keep_turns boundaries. Mutates in place."""
     turns_seen = 0
     for i in range(len(messages) - 1, -1, -1):
         msg = messages[i]
@@ -93,43 +81,8 @@ def run_subsession(
     total_cost = 0.0
     last_text = ""
 
-    # Escalation state — only active when escalation_config is provided
-    esc = config.escalation_config
-    metrics: EscalationMetrics | None = EscalationMetrics(current_model=config.model) if esc else None
-    current_model = config.model
-
-    def _maybe_escalate(turn: int, check_text: str = "") -> None:
-        nonlocal current_model
-        if esc is None or metrics is None:
-            return
-        triggered, reason = should_escalate(esc, metrics, turn, config.max_turns, check_text)
-        if not triggered:
-            return
-        esc_msg = build_escalation_message(
-            task_text=state.task_text,
-            reason=reason,
-            turn=turn,
-            cost_so_far=total_cost,
-            messages=messages,
-            escalated_model=esc.escalated_model,
-        )
-        messages.append({"role": "user", "content": esc_msg})
-        old_model = current_model
-        current_model = esc.escalated_model
-        metrics.current_model = current_model
-        metrics.escalation_count += 1
-        metrics.escalation_reason = reason
-        tracer.emit("model.escalated", {
-            "old_model": old_model,
-            "new_model": current_model,
-            "reason": reason,
-            "turn": turn,
-            "cost_so_far": total_cost,
-        })
-
     for turn in range(config.max_turns):
-        elapsed = time.time() - start_time
-        if elapsed > config.max_wall_seconds:
+        if time.time() - start_time > config.max_wall_seconds:
             tracer.emit("task.budget_exhausted", {"reason": "wall time"})
             return SubsessionResult(
                 status="budget_exhausted",
@@ -151,39 +104,34 @@ def run_subsession(
                 total_cost_usd=total_cost,
             ), state
 
-        # Check turn-fraction escalation before calling the model
-        _maybe_escalate(turn)
-
-        # Compress stale tool results once we hit the threshold, then every turn after
         if turn >= _COMPRESS_AFTER_TURN:
-            _compress_history(messages, keep_turns=_KEEP_RECENT_TURNS)
+            _compress_history(messages)
             if turn == _COMPRESS_AFTER_TURN:
                 tracer.emit("history.compressed", {"turn": turn, "keep_turns": _KEEP_RECENT_TURNS})
 
         api_kwargs: dict = dict(
-            model=current_model,
+            model=config.model,
             messages=messages,
             temperature=0,
-            **_token_limit_kwargs(current_model, config.max_tokens),
+            **_token_limit_kwargs(config.model, config.max_tokens),
         )
         if config.tools_schema:
             api_kwargs["tools"] = config.tools_schema
             api_kwargs["parallel_tool_calls"] = False
 
         response = None
-        max_attempts = 3
-        for attempt in range(max_attempts):
+        for attempt in range(3):
             try:
                 response = client.chat.completions.create(**api_kwargs)
                 break
             except openai.RateLimitError as exc:
                 wait = min(2 ** attempt * 5, 60)
                 tracer.emit("model_error", {"error": str(exc), "turn": turn, "retry_in": wait})
-                if attempt == max_attempts - 1:
+                if attempt == 2:
                     return SubsessionResult(
                         status="error",
                         messages=messages,
-                        summary=f"Rate limit exhausted after retries: {exc}",
+                        summary=f"Rate limit exhausted: {exc}",
                         total_turns=turn,
                         total_cost_usd=total_cost,
                     ), state
@@ -197,15 +145,14 @@ def run_subsession(
                     total_turns=turn,
                     total_cost_usd=total_cost,
                 ), state
-        assert response is not None
 
+        assert response is not None
         choice = response.choices[0]
         msg = choice.message
-        finish_reason = choice.finish_reason
 
         input_tokens = response.usage.prompt_tokens
         output_tokens = response.usage.completion_tokens
-        cost = estimate_cost(current_model, input_tokens, output_tokens)
+        cost = estimate_cost(config.model, input_tokens, output_tokens)
         total_cost += cost
         state = state.apply_update({
             "budgets": state.budgets.copy_with(
@@ -216,16 +163,15 @@ def run_subsession(
 
         tracer.emit("model_response", {
             "turn": turn,
-            "model": current_model,
+            "model": config.model,
             "input_tokens": input_tokens,
             "output_tokens": output_tokens,
             "cost_usd": cost,
-            "stop_reason": finish_reason,
+            "stop_reason": choice.finish_reason,
         })
 
         last_text = msg.content or last_text
 
-        # Serialize assistant message into conversation history
         assistant_msg: dict = {"role": "assistant", "content": msg.content}
         if msg.tool_calls:
             assistant_msg["tool_calls"] = [
@@ -238,12 +184,10 @@ def run_subsession(
             ]
         messages.append(assistant_msg)
 
-        if finish_reason == "tool_calls" and msg.tool_calls:
+        if choice.finish_reason == "tool_calls" and msg.tool_calls:
             for tc in msg.tool_calls:
                 args = json.loads(tc.function.arguments)
                 result_str = registry.execute(tc.function.name, args, state.workspace_path)
-                if metrics is not None:
-                    record_tool_result(metrics, tc.function.name, args, result_str)
                 state = state.apply_update({
                     "budgets": state.budgets.copy_with(
                         used_tool_calls=state.budgets.used_tool_calls + 1,
@@ -258,38 +202,15 @@ def run_subsession(
                     "tool_call_id": tc.id,
                     "content": result_str,
                 })
-            # Check escalation after all tool calls in this turn
-            _maybe_escalate(turn)
         else:
-            done: IsDoneOutput = check_is_done(
-                task_text=state.task_text,
-                last_assistant_message=last_text,
-                state=state,
-            )
-            tracer.emit("is_done_check", {
-                "is_done": done.is_done,
-                "confidence": done.confidence,
-                "reason": done.reason,
-                "missing_steps": done.missing_steps,
-            })
-
-            if done.is_done:
-                return SubsessionResult(
-                    status="done",
-                    messages=messages,
-                    summary=last_text,
-                    total_turns=turn + 1,
-                    total_cost_usd=total_cost,
-                ), state
-
-            if metrics is not None:
-                metrics.failed_completion_checks += 1
-
-            nudge = build_nudge(done.missing_steps, done.reason)
-            messages.append({"role": "user", "content": nudge})
-
-            # Check escalation after failed completion check (also detects blocked text)
-            _maybe_escalate(turn, last_text)
+            # Model produced a text response — implementation turn is complete
+            return SubsessionResult(
+                status="done",
+                messages=messages,
+                summary=last_text,
+                total_turns=turn + 1,
+                total_cost_usd=total_cost,
+            ), state
 
     return SubsessionResult(
         status="budget_exhausted",

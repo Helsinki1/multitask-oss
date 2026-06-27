@@ -34,11 +34,50 @@ class BudgetState:
 
 
 @dataclass
+class TestCase:
+    """One test the harness must run. Updated after each VERIFY pass."""
+    test_id: str
+    category: str       # "fail_to_pass" | "pass_to_pass"
+    status: str         # "failing" | "passing" | "unknown"
+    traceback: str = "" # last captured pytest output for this test
+
+
+@dataclass
+class TestToDoList:
+    """Deterministic record of test status — never LLM-populated."""
+    cases: list[TestCase] = field(default_factory=list)
+
+    @property
+    def f2p_failing(self) -> list[TestCase]:
+        return [c for c in self.cases if c.category == "fail_to_pass" and c.status != "passing"]
+
+    @property
+    def p2p_failing(self) -> list[TestCase]:
+        return [c for c in self.cases if c.category == "pass_to_pass" and c.status == "failing"]
+
+    @property
+    def all_f2p_pass(self) -> bool:
+        f2p = [c for c in self.cases if c.category == "fail_to_pass"]
+        return bool(f2p) and all(c.status == "passing" for c in f2p)
+
+    @property
+    def all_pass(self) -> bool:
+        return bool(self.cases) and all(c.status == "passing" for c in self.cases)
+
+    def summary(self) -> str:
+        f2p = [c for c in self.cases if c.category == "fail_to_pass"]
+        p2p = [c for c in self.cases if c.category == "pass_to_pass"]
+        f2p_pass = sum(1 for c in f2p if c.status == "passing")
+        p2p_pass = sum(1 for c in p2p if c.status == "passing")
+        lines = [f"fail_to_pass: {f2p_pass}/{len(f2p)} passing"]
+        if p2p:
+            lines.append(f"pass_to_pass: {p2p_pass}/{len(p2p)} passing")
+        return "  ".join(lines)
+
+
+@dataclass
 class ContextBundle:
-    repo_summary: str = ""
-    task_summary: str = ""
     repo_rules: list[str] = field(default_factory=list)
-    coding_standards: list[str] = field(default_factory=list)
     build_and_test_commands: list[str] = field(default_factory=list)
     repo_map: str = ""
     task_adjacent_files: list[dict] = field(default_factory=list)
@@ -65,7 +104,6 @@ class AgentState:
     repo_name: str = ""
     base_branch: str = "main"
     working_branch: str = ""
-    is_public_repo: bool = False
 
     # Sandbox
     workspace_path: str = ""
@@ -74,49 +112,35 @@ class AgentState:
     # Task
     task_text: str = ""
     task_source: str = "cli"
+    task_type: str = "bug_fix"  # "bug_fix" | "additive" — set by LOAD_TASK
     context_bundle: ContextBundle = field(default_factory=ContextBundle)
 
     # Git
     initial_commit_sha: Optional[str] = None
-    merge_base_sha: Optional[str] = None
-    changed_files: list[str] = field(default_factory=list)
+    working_branch_sha: Optional[str] = None  # SHA before first implementation attempt
 
     # Orchestration
-    current_node: str = "01_CHECK_BRANCH"
-    implementation_done: bool = False
+    current_node: str = "CHECK_BRANCH"
     task_status: str = "running"  # "running" | "done" | "failed" | "cancelled"
 
-    # Task classification
-    task_type: str = "bug_fix"  # "bug_fix" | "additive" — set by PREPARE_CONTEXT
+    # Structured test to-do list (updated deterministically by GATHER_CONTEXT / VERIFY)
+    todo_list: TestToDoList = field(default_factory=TestToDoList)
 
-    # Reproduction
-    repro_confirmed: bool = False
-    repro_output: str = ""
-    repro_env_path: str = "_repro_env"
-
-    # Verification (post-implementation)
+    # Retry state
     verify_attempts: int = 0
-    verify_failure_output: str = ""
+    verify_failure_type: str = ""  # "f2p_failing" | "p2p_regression" | ""
 
-    # Eval mode (external benchmarks: SWE-bench etc.)
+    # Eval mode (SWE-bench etc.)
     eval_mode: bool = False
     fail_to_pass: list[str] = field(default_factory=list)
     pass_to_pass: list[str] = field(default_factory=list)
 
-    # Validation
-    lint_status: str = "not_run"
-    test_status: str = "not_run"
-    policy_status: str = "not_run"
-    push_status: str = "not_run"
+    # Additive path: path to the contract test file written by DEFINE_CONTRACT
+    contract_test_path: str = ""
 
     # Output
     pr_url: Optional[str] = None
     branch_url: Optional[str] = None
-
-    # Flags
-    run_ci_loop: bool = False
-    run_related_tests: bool = False
-    only_implement: bool = True  # default: implement only, no push/PR
     allow_push: bool = False
 
     # Resources
@@ -141,15 +165,7 @@ class AgentState:
         return self.apply_update({"errors": self.errors + [error]})
 
     def to_dict(self) -> dict:
-        import json
         from dataclasses import asdict
-
-        def _serialize(obj: object) -> object:
-            if isinstance(obj, datetime):
-                return obj.isoformat()
-            return obj
-
-        raw = asdict(self)
 
         def _walk(obj: object) -> object:
             if isinstance(obj, dict):
@@ -160,18 +176,17 @@ class AgentState:
                 return obj.isoformat()
             return obj
 
-        return _walk(raw)
+        return _walk(asdict(self))
 
     @classmethod
     def from_dict(cls, d: dict) -> "AgentState":
-        from datetime import datetime
-
         budgets_d = d.pop("budgets", {})
         cb_d = d.pop("context_bundle", {})
         errors_d = d.pop("errors", [])
+        todo_d = d.pop("todo_list", {})
 
         budgets = BudgetState(**budgets_d) if budgets_d else BudgetState()
-        cb = ContextBundle(**cb_d) if cb_d else ContextBundle()
+        cb = ContextBundle(**{k: v for k, v in cb_d.items() if k in ContextBundle.__dataclass_fields__}) if cb_d else ContextBundle()
         errors = [
             NodeError(
                 node=e["node"],
@@ -182,5 +197,13 @@ class AgentState:
             )
             for e in errors_d
         ]
+        cases = [TestCase(**c) for c in todo_d.get("cases", [])]
+        todo_list = TestToDoList(cases=cases)
 
-        return cls(budgets=budgets, context_bundle=cb, errors=errors, **d)
+        return cls(
+            budgets=budgets,
+            context_bundle=cb,
+            errors=errors,
+            todo_list=todo_list,
+            **d,
+        )

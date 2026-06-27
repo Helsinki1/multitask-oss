@@ -1,14 +1,12 @@
 Done
 * memory compression after 20 conversation turns
-* prompt injection for likely relevant files
+* error tracebacks and dependency graphs for context gathering
 * cut down tooling from 11 to 4: run_shell, read_file, write_file, replace_in_file (rely on LLM strength in reliable unix patterns)
 * agent is able to make custom python scripts to tighten devloop if it thinks it can condense 10+ bash lines (node)
-* agent is encouraged to create mirror/twin minimal repo w files relevant to error, then reproduce identical error msg (node)
 * set temperature=0
 * environmental noise suppression: PAGER=cat, MANPAGER=cat, TQDM_DISABLE=1, PIP_PROGRESS_BAR=off -- eliminates the garbage (progress bars, pagers, ANSI codes) that eats context tokens and confuses models
 * force agent to make one bash exec per turn
 * model-agnostic routing: cheap models for file discovery, strong models for patch generation
-* reproducibility pipeline (not optional): Analyze codebase, write a reproduction script that fails, edit source code to fix it, verify the repro now passes, test edge cases, implement on actual repo
 * added a simple classifier for "bug fix" vs "additive" tasks --- if additive task fails, it goes into bug fix mode but without the reproduce-issue steps
 * SWE-bench eval harness (swe_bench_run.py): eval_mode flag skips mirror-building, uses planted FAIL_TO_PASS/PASS_TO_PASS test IDs for deterministic repro confirmation and verify
 
@@ -54,44 +52,20 @@ clear product vision
 
 -----------------------------------------------------------------------------------------------------------------------
 
+LEARNINGS & INSIGHTS
 
+the coding agent is still failing in almost the same identicaly way. i think we need a total annhilation-level gutting of the current
+  architecture and start from a clean slate from first principles. The overall architecture should look like this: 1) check branch 2) load
+  task IF BUG FIX: 3) run tests 4) use traceback to gather context upstream/downstream of errored files 5) implementing-fix subsession 6)
+  verify fix (checking for fail-to-pass and pass-to-pass) IF FAIL-to-PASS still failing, go back to 5) implement-fix subsession, ELSE IF
+  pass-to-pass now failing, go back to 3-4) use tracebacks from tests to gather context and so forth. ELSE IF (not bug fix) TASK IS
+  ADDITIVE: 3) use a special context gathering algorithm/tool call to let agent make a repo map and dependency graph 4) define desired
+  behavior / desired final state for the codebase 5) make a rubric and test cases for verification 6) implement subsession 7) verify
+  implementation using rubric/test cases IF FAIL: go back to 4-5) question desired behavior and try implementing again ---------------- you
+  see how this is much more organized than what we have now? I also think these are great ideas to champion: we NEED a clear to-do list to
+  keep track of fail-to-pass cases we need to solve AS WELL AS pass-to-pass regressions we need to address; instead of prompting the agent
+  to make repo maps or dependency graphs, we write an algorithm and turn it into a tool call the agent should use at specified steps for
+  context gathering ------------- let me hear your thoughts on this
 
-What was built and why
-
-Workstream A — Traceback-driven context (agent/context.py)
-
-_run_failing_tests: Runs up to 3 FAIL_TO_PASS test IDs with --tb=long before the agent starts. Limited to 3 tests to keep it fast; --tb=long gives full frame info.
-
-_parse_traceback: Handles both traceback formats — standard Python (File "path", line N) and pytest short format (path:N: in func). Filters to files that (a) exist and (b) are inside the workspace, which excludes stdlib and site-packages automatically. Non-test source files are ordered first because they're where the bug lives; test files go to end since the agent already knows about them from fail_to_pass.
-
-_build_import_subgraph: Pure AST parsing — no code execution. Walks import and from X import Y statements, resolves each to a .py file in the workspace via _module_to_file. One hop catches transitive deps (e.g. for sympy: test_basic.py → symbol.py, basic.py directly, then symbol.py → assumptions.py). Two hops is available but one is usually enough and keeps the file list manageable.
-
-_find_range_around_line: When we know the errored line from the traceback, we show the surrounding function/class body, not the whole file. Walks backward to find the enclosing def/class header, forward to the next same-level definition. Caps at 80 lines so we don't dump 2000-line classes.
-
-_find_files_from_test_imports: Fallback for when pytest isn't installed yet. Statically traces AST imports from the test files — weaker than traceback parsing but better than nothing.
-
-build_context_bundle: Now accepts fail_to_pass. Two completely separate paths: eval mode uses the traceback pipeline, normal mode uses the LLM call. The old keyword search is gone entirely.
-
----
-Workstream B — LLM file selector (_gather_context_with_llm)
-
-Design: Single LLM call, not a multi-turn agent. The repo map already lists all files with their key symbols; a single call asking "which of these files are relevant?" gets 85% of the quality of a multi-turn grep agent at 1/10 the cost and latency. Multi-turn agent adds ~$0.05 and 20 seconds for marginal gain.
-
-Returns {path, why} only — not content. build_context_bundle reads the files separately. This means the mock in tests only needs to return path+why, and file reading (the 150-line cap) is tested independently.
-
-discovery_model — same cheap model used for task classification. Falls back silently to [] on any error; the agent can still explore on its own.
-
----
-Workstream C — Tool-creation culture (agent/prompts.py, seed_scripts.py, implement_task.py)
-
-Reflection sentence in LAYER_1_BASE: "After each tool result, write ONE sentence: what you now know and what you need next." This directly addresses the loop behavior in the sympy trace — the agent ran the same grep 4+ times across subsessions without articulating what was missing. Forcing one sentence creates a feedback loop.
-
-"Stop repeating" rule: Added to LAYER_1_BASE: if you've run the same search twice without new findings, write a diagnostic script. This is the exact failure mode from the sympy trace and is stated as a hard rule rather than a suggestion.
-
-LAYER_DIAGNOSTIC_TOOLS: Contains a concrete 8-turn narrative — "Turn 3: pytest fails. Turn 4: write mro_check.py. Turn 5: run it, output shows StdFactKB is the culprit. Turn 6: grep. Turn 7: fix. Turn 8: passes." Then explicitly names what the bad pattern looks like. Concrete examples are more influential than abstract rules.
-
-mro_check.py and import_graph.py in seed_scripts.py: Two scripts the agent should reach for before inventing equivalent tools. Described in LAYER_2_ENV so the agent knows they exist on turn 1, not after it's already spent 10 turns failing.
-
-_collect_agent_scripts in implement_task.py: Scans _agent_scripts/ for user-created scripts (excluding the seeded ones), extracts the Purpose: line from each docstring, and injects them via LAYER_EXISTING_TOOLS_TEMPLATE into the next subsession. When the agent writes check_ancestry.py in subsession 1 and fails, subsession 2 starts knowing that script exists — it doesn't re-derive the same diagnostic.
-
-build_implement_human: Now includes lines="N-M" and why="..." attributes on each file tag when available, directly from the traceback-driven metadata. The agent sees exactly why each file was selected and which line range was errored.
+right: traceback-driven context gathering, diff retry loops for diff failure types (f2p p2p-regression), (for additive) algorithmic dep-graph context gathering as a tool call, structured to-do list (deterministic by test case, NOT llm's choice)
+wrong: letting llm write desired behavior w/o strict verifiable contracts (test-step will write trivial tests), CAREFULLY frame completed work when moving onto future tasks, 

@@ -1,0 +1,204 @@
+"""Node IMPLEMENT: LLM subsession that makes the code changes.
+
+Receives structured context (TestToDoList + pre-loaded files) from GATHER_CONTEXT
+or GATHER_ADDITIVE_CONTEXT, runs the implement subsession, then routes to VERIFY.
+
+Does NOT assess its own completion — that is handled deterministically by VERIFY.
+"""
+
+from __future__ import annotations
+
+import os
+from pathlib import Path
+
+from agent.prompts import (
+    build_additive_system,
+    build_bugfix_system,
+    build_implement_human,
+)
+from agent.runtime import Node, NodeResult
+from agent.state import AgentState
+from agent.subsession import SubsessionConfig, run_subsession
+from cloud_agent.config import settings
+from observability.tracer import Tracer
+from tools.registry import ToolRegistry, build_dev_toolset
+
+
+_MRO_CHECK = '''\
+"""
+Purpose: Dump Python MRO + __slots__ at every inheritance level for a class.
+Problem: __slots__ suppression requires EVERY ancestor to declare it — a single
+         class missing __slots__ = () causes the whole chain to have __dict__.
+Usage:   python _agent_scripts/mro_check.py sympy.core.symbol.Symbol
+"""
+import importlib
+import sys
+
+def main():
+    if len(sys.argv) < 2:
+        print("Usage: mro_check.py pkg.module.ClassName")
+        sys.exit(1)
+    dotted = sys.argv[1]
+    module_path, _, cls_name = dotted.rpartition(".")
+    mod = importlib.import_module(module_path)
+    cls = getattr(mod, cls_name)
+    print(f"MRO for {dotted}:")
+    for c in cls.__mro__:
+        slots = getattr(c, "__slots__", "** MISSING **")
+        print(f"  {c.__module__}.{c.__name__}  __slots__ = {slots!r}")
+
+if __name__ == "__main__":
+    main()
+'''
+
+_IMPORT_GRAPH = '''\
+"""
+Purpose: Show what a file imports and what other workspace files import it.
+Problem: Need to understand transitive dependencies without running the code.
+Usage:   python _agent_scripts/import_graph.py sympy/core/_print_helpers.py
+"""
+import ast
+import os
+import sys
+
+def get_imports(filepath):
+    try:
+        tree = ast.parse(open(filepath, errors="ignore").read())
+    except Exception:
+        return []
+    names = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module:
+            names.append(node.module)
+        elif isinstance(node, ast.Import):
+            names.extend(a.name for a in node.names)
+    return names
+
+def main():
+    if len(sys.argv) < 2:
+        print("Usage: import_graph.py path/to/file.py")
+        sys.exit(1)
+    target = os.path.abspath(sys.argv[1])
+    workspace = os.getcwd()
+
+    print(f"Imports declared in {sys.argv[1]}:")
+    for name in get_imports(target):
+        print(f"  {name}")
+
+    print(f"\\nWorkspace files that import {os.path.relpath(target, workspace)}:")
+    for root, dirs, files in os.walk(workspace):
+        dirs[:] = [d for d in dirs if d not in {".git", "__pycache__", "node_modules", ".venv"}]
+        for f in files:
+            if not f.endswith(".py"):
+                continue
+            fp = os.path.join(root, f)
+            if fp == target:
+                continue
+            src = open(fp, errors="ignore").read()
+            rel_target = os.path.relpath(target, workspace).replace(os.sep, "/").replace("/", ".").removesuffix(".py")
+            if rel_target.split(".")[-1] in src or os.path.basename(target).removesuffix(".py") in src:
+                print(f"  {os.path.relpath(fp, workspace)}")
+
+if __name__ == "__main__":
+    main()
+'''
+
+
+def _seed_agent_scripts(workspace: str) -> None:
+    scripts_dir = Path(workspace) / "_agent_scripts"
+    scripts_dir.mkdir(exist_ok=True)
+
+    gitignore = Path(workspace) / ".gitignore"
+    try:
+        existing = gitignore.read_text() if gitignore.exists() else ""
+        if "_agent_scripts/" not in existing:
+            with gitignore.open("a") as f:
+                f.write("\n_agent_scripts/\n")
+    except OSError:
+        pass
+
+    for name, content in [("mro_check.py", _MRO_CHECK), ("import_graph.py", _IMPORT_GRAPH)]:
+        p = scripts_dir / name
+        if not p.exists():
+            p.write_text(content)
+
+
+def _collect_agent_scripts(workspace: str) -> list[str]:
+    """Return name+Purpose for user-created scripts in _agent_scripts/ (not seeded ones)."""
+    seeded = {"mro_check.py", "import_graph.py"}
+    scripts_dir = Path(workspace) / "_agent_scripts"
+    if not scripts_dir.exists():
+        return []
+    result: list[str] = []
+    for p in sorted(scripts_dir.glob("*.py")):
+        if p.name in seeded:
+            continue
+        summary = ""
+        try:
+            for line in p.read_text(encoding="utf-8", errors="ignore").splitlines()[:20]:
+                stripped = line.strip().strip('"""').strip("'''")
+                if stripped.startswith("Purpose:"):
+                    summary = stripped[len("Purpose:"):].strip()
+                    break
+        except OSError:
+            pass
+        result.append(p.name + (f" — {summary}" if summary else ""))
+    return result
+
+
+class ImplementNode(Node):
+    name = "IMPLEMENT"
+    node_type = "llm_subsession"
+    failure_next = "CHECKPOINT"
+
+    def __init__(self, tracer: Tracer) -> None:
+        self.tracer = tracer
+
+    def run(self, state: AgentState) -> NodeResult:
+        ws = state.workspace_path
+        _seed_agent_scripts(ws)
+
+        existing_scripts = _collect_agent_scripts(ws)
+        if existing_scripts:
+            scripts_note = "\nUser-created scripts from prior attempts (reuse before recreating):\n" + \
+                           "\n".join(f"  _agent_scripts/{s}" for s in existing_scripts)
+        else:
+            scripts_note = ""
+
+        if state.task_type == "additive":
+            system = build_additive_system(state)
+        else:
+            system = build_bugfix_system(state)
+
+        if scripts_note:
+            system = system + "\n\n---\n\n" + scripts_note.strip()
+
+        registry = ToolRegistry()
+        build_dev_toolset(registry)
+
+        config = SubsessionConfig(
+            name="implement",
+            system_prompt=system,
+            initial_human_message=build_implement_human(state),
+            model=settings.implement_model,
+            tools_schema=registry.to_openai_schema(),
+            max_turns=state.budgets.max_llm_turns,
+            max_wall_seconds=state.budgets.max_wall_seconds,
+            max_tokens=8192,
+        )
+
+        result, updated_state = run_subsession(config, state, registry, self.tracer)
+
+        self.tracer.emit("subsession.done", {
+            "status": result.status,
+            "turns": result.total_turns,
+            "cost_usd": result.total_cost_usd,
+        })
+
+        next_node = "VERIFY" if state.task_type == "bug_fix" else "VERIFY_ADDITIVE"
+
+        return NodeResult(
+            next_node=next_node,
+            state_update={"budgets": updated_state.budgets},
+            status="ok" if result.status == "done" else "warning",
+        )

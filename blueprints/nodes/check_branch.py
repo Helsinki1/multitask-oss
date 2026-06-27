@@ -1,4 +1,4 @@
-"""Node 01: CHECK_FOR_CLEAN_BRANCH.
+"""Node CHECK_BRANCH: verify workspace safety, capture initial SHA, ensure working branch.
 
 Verifies workspace safety, captures initial SHA, ensures we're on a working branch.
 """
@@ -22,7 +22,7 @@ def _slugify(text: str, max_words: int = 5) -> str:
 
 
 class CheckBranchNode(Node):
-    name = "01_CHECK_BRANCH"
+    name = "CHECK_BRANCH"
     node_type = "deterministic"
     failure_next = "END"
 
@@ -54,7 +54,7 @@ class CheckBranchNode(Node):
                 raise RuntimeError(f"Failed to create branch '{working_branch}': {err2}")
 
         return NodeResult(
-            next_node="SEED_SCRIPTS",
+            next_node="LOAD_TASK",
             state_update={
                 "initial_commit_sha": sha,
                 "working_branch": working_branch,

@@ -9,16 +9,18 @@ class BudgetExhausted(Exception):
         super().__init__(reason)
 
 
-# Approximate cost per million tokens (USD)
+# Approximate cost per million tokens (USD) — update as pricing changes
 _COST_PER_M_INPUT: dict[str, float] = {
-    "gpt-4o": 75.0,
     "gpt-4o": 2.5,
     "gpt-4o-mini": 0.15,
+    "gpt-5.4-mini": 1.10,
+    "gpt-5.5": 15.0,
 }
 _COST_PER_M_OUTPUT: dict[str, float] = {
-    "gpt-4o": 150.0,
     "gpt-4o": 10.0,
     "gpt-4o-mini": 0.6,
+    "gpt-5.4-mini": 4.40,
+    "gpt-5.5": 60.0,
 }
 
 

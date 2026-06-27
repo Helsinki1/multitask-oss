@@ -1,7 +1,4 @@
-"""Node 05: CHECKPOINT_DEVELOPMENT.
-
-Commits implementation changes before deterministic steps mutate files.
-"""
+"""Node CHECKPOINT: commit implementation changes at the end of a run."""
 
 import subprocess
 
@@ -15,7 +12,7 @@ def _git(args: list[str], cwd: str) -> tuple[int, str, str]:
 
 
 class CheckpointNode(Node):
-    name = "05_CHECKPOINT"
+    name = "CHECKPOINT"
     node_type = "deterministic"
     failure_next = "END"
 
