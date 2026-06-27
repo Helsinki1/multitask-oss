@@ -44,7 +44,11 @@ class PrepareContextNode(Node):
     failure_next = "04_IMPLEMENT_TASK"  # degraded context is non-fatal
 
     def run(self, state: AgentState) -> NodeResult:
-        cb = build_context_bundle(state.workspace_path, state.task_text)
+        cb = build_context_bundle(
+            state.workspace_path,
+            state.task_text,
+            fail_to_pass=state.fail_to_pass if state.eval_mode else None,
+        )
         if state.eval_mode:
             # External benchmarks always provide failing tests; skip classifier.
             return NodeResult(

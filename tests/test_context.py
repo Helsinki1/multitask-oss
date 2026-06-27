@@ -9,14 +9,20 @@ from cloud_agent.config import Settings
 
 
 def test_build_context_bundle_preloads_task_adjacent_files(tmp_path, monkeypatch):
+    """LLM selects the file; build_context_bundle reads it and enforces the 150-line cap."""
     src = tmp_path / "cloud_agent" / "agent"
     src.mkdir(parents=True)
     context_file = src / "context.py"
     context_file.write_text("\n".join(f"line {i}" for i in range(200)), encoding="utf-8")
-    unrelated_file = tmp_path / "README.md"
-    unrelated_file.write_text("hello", encoding="utf-8")
 
     monkeypatch.setattr("agent.context.fetch_remote_agents_files", lambda *_: [])
+    # Mock the LLM selection: it returns path+why, build_context_bundle reads the file.
+    monkeypatch.setattr(
+        "agent.context._gather_context_with_llm",
+        lambda workspace, task_text, repo_map: [
+            {"path": "cloud_agent/agent/context.py", "why": "explicitly named in the task"},
+        ],
+    )
 
     cb = build_context_bundle(
         str(tmp_path),
@@ -26,7 +32,7 @@ def test_build_context_bundle_preloads_task_adjacent_files(tmp_path, monkeypatch
     assert cb.task_adjacent_files
     first = cb.task_adjacent_files[0]
     assert first["path"] == "cloud_agent/agent/context.py"
-    assert first["score"] > 0
+    assert first["why"] == "explicitly named in the task"
     assert "line 149" in first["content"]
     assert "line 150" not in first["content"]
 

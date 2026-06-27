@@ -24,7 +24,7 @@ Improvements
 * best ideas ive seen:
     - making dependency graphs (or simply telling the agent to pay special attention to dependencies) of the files that produce errors -- allowing easy traversal upstream/downstream to find the problem
     - giving a separate agent grep and assigning it / training it to specialize on gathering useful context (making our own might be out of scope here),
-    - side-stepping all that entirely and just letting the agent make its own custom tools --- but how in the world do we make the agent so darn creative its able to make custom scripts/tool calls that reveal so much useful information to solve the problem? do we just give it like unlimited turns or something?
+    - side-stepping all that entirely and just letting the agent make its own custom tools --- but how in the world do prompt/inspire the agent so well it's able to make custom scripts/tool calls that reveal so much useful information to solve the problem?
 
 * walkie-talkie daemon for local multi-agent orchestration
 * failure handling: sharp decomposition test ("is the seam a data/interface boundary or shared mutable state?"), bounded retries (3) before escalating, "trust but verify" (re-run the child's checks yourself, never accept its self-report), and a blocked_on taxonomy (SECRET: / DECISION: / ACCESS: / EXTERNAL:) for batched human escalation.
@@ -56,107 +56,42 @@ clear product vision
 
 
 
+What was built and why
 
+Workstream A — Traceback-driven context (agent/context.py)
 
-The Problems (concrete)
+_run_failing_tests: Runs up to 3 FAIL_TO_PASS test IDs with --tb=long before the agent starts. Limited to 3 tests to keep it fast; --tb=long gives full frame info.
 
-1. Context gathering is useless. _find_task_adjacent_files scores file paths by keyword match, reads first 150 lines. For the sympy case it would find symbol.py but miss basic.py entirely because "basic" isn't in the issue text. It never looks at what the failing tests actually import.
+_parse_traceback: Handles both traceback formats — standard Python (File "path", line N) and pytest short format (path:N: in func). Filters to files that (a) exist and (b) are inside the workspace, which excludes stdlib and site-packages automatically. Non-test source files are ordered first because they're where the bug lives; test files go to end since the agent already knows about them from fail_to_pass.
 
-2. No tool-creation culture. LAYER_BASH_SKILLS mentions _agent_scripts/ for "complex/repeated operations" but gives no recipes. The agent needs permission + a specific mental model of when to create tools. Live-SWE-agent's insight: one reminder sentence per turn nearly doubled tool creation.
+_build_import_subgraph: Pure AST parsing — no code execution. Walks import and from X import Y statements, resolves each to a .py file in the workspace via _module_to_file. One hop catches transitive deps (e.g. for sympy: test_basic.py → symbol.py, basic.py directly, then symbol.py → assumptions.py). Two hops is available but one is usually enough and keeps the file list manageable.
 
-3. Subsessions restart cold. Each time VERIFY_FIX fails and routes back to 04_IMPLEMENT_TASK, the agent gets a fresh empty message history. It re-greps the same files from scratch. The _agent_scripts/ dir persists but the agent doesn't know what's in it.
+_find_range_around_line: When we know the errored line from the traceback, we show the surrounding function/class body, not the whole file. Walks backward to find the enclosing def/class header, forward to the next same-level definition. Caps at 80 lines so we don't dump 2000-line classes.
 
-4. SEED_SCRIPTS plants the wrong tool. docker_run.py is useless in Modal (no Docker) and wasn't used once in the trace. The seed slot should plant diagnostic tools, not infra scaffolding.
+_find_files_from_test_imports: Fallback for when pytest isn't installed yet. Statically traces AST imports from the test files — weaker than traceback parsing but better than nothing.
 
----
-The Plan (prioritized by impact/effort)
-
-Priority 1 — Prompt: tool creation recipes + per-turn reflection nudge
-
-Files: agent/prompts.py
-Effort: 1 hour
-
-Add a LAYER_DIAGNOSTIC_TOOLS block to the system prompt with explicit if→then patterns:
-
-If you see a failing test involving inheritance/slots/dict:
-  python -c "from module import Cls; print([(c.__name__, c.__dict__.get('__slots__','MISSING')) for c in Cls.__mro__])"
-
-If you see an ImportError or AttributeError:
-  python -c "import importlib, sys; m = importlib.import_module('pkg'); print
-  Then grep for the missing name: grep -rn "def missing_name\|class missing_name" .
-
-If you need to understand what a test actually tests:
-  Read the test file FIRST. Extract the class/function names it imports.
-  Then grep those names in the source tree — not the tests directory.
-
-If the same bash operation needs to run more than twice, write it as a script
-in _agent_scripts/ with a descriptive name. Call it via run_shell.
-
-Also add a single line to NUDGE_TEMPLATE (already in prompts.py, fires every
-- Consider: would a diagnostic script in _agent_scripts/ reveal what you need in one call?
+build_context_bundle: Now accepts fail_to_pass. Two completely separate paths: eval mode uses the traceback pipeline, normal mode uses the LLM call. The old keyword search is gone entirely.
 
 ---
-Priority 2 — SEED_SCRIPTS: plant mro_check.py instead of (or alongside) docke
+Workstream B — LLM file selector (_gather_context_with_llm)
 
-Files: blueprints/nodes/seed_scripts.py
-Effort: 1 hour
+Design: Single LLM call, not a multi-turn agent. The repo map already lists all files with their key symbols; a single call asking "which of these files are relevant?" gets 85% of the quality of a multi-turn grep agent at 1/10 the cost and latency. Multi-turn agent adds ~$0.05 and 20 seconds for marginal gain.
 
-Replace the docker_run script with (or add next to it) _agent_scripts/mro_check.py:
+Returns {path, why} only — not content. build_context_bundle reads the files separately. This means the mock in tests only needs to return path+why, and file reading (the 150-line cap) is tested independently.
 
-#!/usr/bin/env python3
-"""
-Purpose: Dump the full MRO of a Python class showing __slots__ presence at each level.
-Problem: __slots__ bugs require seeing the entire inheritance chain — reading
-         by one misses the problematic ancestor.
-Usage: python _agent_scripts/mro_check.py sympy.core.symbol.Symbol
-       python _agent_scripts/mro_check.py django.db.models.Model
-"""
-import sys, importlib
-dotted = sys.argv[1]
-mod_path, cls_name = dotted.rsplit(".", 1)
-mod = importlib.import_module(mod_path)
-cls = getattr(mod, cls_name)
-for c in cls.__mro__:
-    slots = c.__dict__.get("__slots__", "*** MISSING ***")
-    print(f"{c.__module__}.{c.__name__:40s}  __slots__ = {slots}")
-
-And _agent_scripts/import_graph.py:
-"""
-Purpose: Show what a Python file imports and what imports it (reverse deps vi
-Problem: Following import chains manually takes 10+ bash calls.
-Usage: python _agent_scripts/import_graph.py sympy/core/symbol.py
-"""
-
-These give the agent specific, named tools it can reach for on turn 1 instead of discovering the need after 20 turns of confusion.
+discovery_model — same cheap model used for task classification. Falls back silently to [] on any error; the agent can still explore on its own.
 
 ---
-Priority 3 — Context: test-driven file finding for eval_mode
+Workstream C — Tool-creation culture (agent/prompts.py, seed_scripts.py, implement_task.py)
 
-Files: agent/context.py
-Effort: 2-3 hours
+Reflection sentence in LAYER_1_BASE: "After each tool result, write ONE sentence: what you now know and what you need next." This directly addresses the loop behavior in the sympy trace — the agent ran the same grep 4+ times across subsessions without articulating what was missing. Forcing one sentence creates a feedback loop.
 
-Throw out _find_task_adjacent_files for eval_mode entirely. Replace with:
+"Stop repeating" rule: Added to LAYER_1_BASE: if you've run the same search twice without new findings, write a diagnostic script. This is the exact failure mode from the sympy trace and is stated as a hard rule rather than a suggestion.
 
-1. Parse FAIL_TO_PASS test IDs → locate the test files
-2. Read those test files → extract all imported names (ast.parse)
-3. For each imported name, grep the source tree for its definition
-4. For any class found, extract its base classes (1 level up)
-5. Return: [{file, line_start, line_end, why}] — specific ranges, not first-150-lines
+LAYER_DIAGNOSTIC_TOOLS: Contains a concrete 8-turn narrative — "Turn 3: pytest fails. Turn 4: write mro_check.py. Turn 5: run it, output shows StdFactKB is the culprit. Turn 6: grep. Turn 7: fix. Turn 8: passes." Then explicitly names what the bad pattern looks like. Concrete examples are more influential than abstract rules.
 
-This is a deterministic 5-step pipeline that mirrors what SWE-grep does with RL — except we're not training anything, we're just using the failing tests as the oracle they already are.
-The test knows exactly what broke; we just follow the imports.
+mro_check.py and import_graph.py in seed_scripts.py: Two scripts the agent should reach for before inventing equivalent tools. Described in LAYER_2_ENV so the agent knows they exist on turn 1, not after it's already spent 10 turns failing.
 
-For normal mode: swap keyword-in-path scoring for keyword-in-content grep (aln tools/search.py that wraps ripgrep — just use it).
+_collect_agent_scripts in implement_task.py: Scans _agent_scripts/ for user-created scripts (excluding the seeded ones), extracts the Purpose: line from each docstring, and injects them via LAYER_EXISTING_TOOLS_TEMPLATE into the next subsession. When the agent writes check_ancestry.py in subsession 1 and fails, subsession 2 starts knowing that script exists — it doesn't re-derive the same diagnostic.
 
----
-Priority 4 — Cross-subsession tool memory
-
-Files: blueprints/nodes/implement_task.py, agent/prompts.py
-Effort: 1 hour
-
-Before building the system prompt in ImplementTaskNode.run(), scan _agent_scr
-
-existing_scripts = [
-    f for f in os.listdir(Path(state.workspace_path) / "_agent_scripts")
-    if f.endswith(".py") and f != "docker_run.py"
-]
+build_implement_human: Now includes lines="N-M" and why="..." attributes on each file tag when available, directly from the traceback-driven metadata. The agent sees exactly why each file was selected and which line range was errored.

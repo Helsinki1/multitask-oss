@@ -1,5 +1,6 @@
 """PREPARE_CONTEXT logic: build a ContextBundle from the repo."""
 
+import ast
 import os
 import re
 import subprocess
@@ -12,14 +13,13 @@ from agent.state import ContextBundle
 _RULE_FILES = ["AGENTS.md", "CLAUDE.md", ".cursor/rules", ".github/copilot-instructions.md"]
 _REMOTE_RULE_FILES = ["AGENTS.md", ".github/AGENTS.md", "docs/AGENTS.md"]
 _SKIP_DIRS = {".git", "__pycache__", "node_modules", ".venv", "venv", ".tox", "dist", "build"}
-_STOPWORDS = {
-    "a", "an", "and", "are", "as", "at", "be", "by", "do", "for", "from", "if",
-    "in", "into", "is", "it", "of", "on", "or", "the", "this", "to", "up", "use",
-    "with", "you", "your",
-}
 
 
-def build_context_bundle(workspace: str, task_text: str) -> ContextBundle:
+def build_context_bundle(
+    workspace: str,
+    task_text: str,
+    fail_to_pass: list[str] | None = None,
+) -> ContextBundle:
     cb = ContextBundle(task_summary=task_text)
 
     # 1. Repository rules from AGENTS.md / CLAUDE.md etc.
@@ -40,14 +40,325 @@ def build_context_bundle(workspace: str, task_text: str) -> ContextBundle:
 
     # 3. Lightweight repo map
     cb.repo_map = _generate_repo_map(workspace)
-    cb.task_adjacent_files = _find_task_adjacent_files(workspace, task_text, cb.repo_map)
+
+    # 4. Task-adjacent files — two strategies depending on mode:
+    #    eval mode  : run failing tests → parse traceback → follow import graph
+    #    normal mode: single LLM call that reads the repo map and selects files
+    if fail_to_pass:
+        cb.task_adjacent_files = _find_task_adjacent_files_eval(workspace, fail_to_pass)
+    else:
+        selections = _gather_context_with_llm(workspace, task_text, cb.repo_map)
+        adjacent = []
+        for sel in selections[:7]:
+            path = sel.get("path", "")
+            full = os.path.join(workspace, path)
+            if not os.path.isfile(full):
+                continue
+            content = _read_file_lines(full, max_lines=150)
+            if content:
+                adjacent.append({"path": path, "why": sel.get("why", ""), "content": content})
+        cb.task_adjacent_files = adjacent
 
     return cb
 
 
+# ── Normal mode: LLM-based file selection ────────────────────────────────────
+
+
+def _gather_context_with_llm(workspace: str, task_text: str, repo_map: str) -> list[dict]:
+    """Single cheap LLM call: read the repo map, return [{path, why}] for relevant files.
+
+    Keeps LLM calls out of the main agent loop for the exploration work. Returns
+    path+why only — caller reads content so file I/O stays in one place.
+    Falls back to [] on any failure (non-fatal: agent can explore on its own).
+    """
+    try:
+        import json
+        import openai
+        from cloud_agent.config import settings
+
+        system = """\
+You are a repository file selector. Given a task and a repo file listing, identify \
+the 3-7 source files most likely to need reading or editing to complete the task.
+
+Output ONLY a JSON array — no markdown fences, no explanation:
+[{"path": "relative/path.py", "why": "one-sentence reason"}, ...]"""
+
+        human = f"Task: {task_text}\n\nRepository files:\n{repo_map[:6000]}"
+
+        client = openai.OpenAI(api_key=settings.openai_api_key)
+        response = client.chat.completions.create(
+            model=settings.discovery_model,
+            temperature=0,
+            max_tokens=600,
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": human},
+            ],
+        )
+        raw = response.choices[0].message.content.strip()
+        # Strip markdown fences if the model adds them despite instructions
+        raw = re.sub(r"^```[a-z]*\n?", "", raw)
+        raw = re.sub(r"\n?```$", "", raw.strip())
+        return json.loads(raw)
+    except Exception:
+        return []
+
+
+# ── Eval mode: traceback-driven file discovery ────────────────────────────────
+
+
+def _find_task_adjacent_files_eval(workspace: str, fail_to_pass: list[str]) -> list[dict]:
+    """Eval mode: run failing tests → parse error traceback → follow import graph.
+
+    The traceback tells us exactly which files were executing when the test
+    broke. Those are the causal files, not a keyword guess. We then follow
+    their import graph one hop to catch transitive dependencies (e.g. a base
+    class defined in a module imported by the failing module).
+    """
+    # Run the tests and capture the full output including traceback
+    error_output = _run_failing_tests(workspace, fail_to_pass)
+
+    # Parse traceback frames: (absolute_path, line_number)
+    frames = _parse_traceback(error_output, workspace)
+
+    if not frames:
+        # Fallback: no runnable tests yet → trace imports from test files statically
+        return _find_files_from_test_imports(workspace, fail_to_pass)
+
+    # Deduplicate preserving order; non-test files first, test files at end
+    seen: set[str] = set()
+    source_frames: list[tuple[str, int]] = []
+    test_frames: list[tuple[str, int]] = []
+    for path, lineno in frames:
+        if path in seen:
+            continue
+        seen.add(path)
+        parts = path.replace("\\", "/").split("/")
+        if any("test" in p.lower() for p in parts):
+            test_frames.append((path, lineno))
+        else:
+            source_frames.append((path, lineno))
+
+    ordered_frames = source_frames + test_frames
+    seed_files = [p for p, _ in ordered_frames][:6]
+    seed_set = set(seed_files)
+
+    # One import-graph hop from each seed file to catch transitive dependencies
+    imported = _build_import_subgraph(workspace, seed_files, hops=1)
+    all_files = seed_files + [f for f in imported if f not in seed_set]
+
+    result: list[dict] = []
+    for filepath in all_files[:8]:
+        lines_for_file = [ln for p, ln in ordered_frames if p == filepath]
+        center = lines_for_file[0] if lines_for_file else 1
+        start, end = _find_range_around_line(filepath, center)
+        content = _read_file_range(filepath, start, end)
+        if not content:
+            continue
+        why = (
+            "appears in error traceback"
+            if filepath in seed_set
+            else f"imported by {os.path.relpath(seed_files[0], workspace)}"
+        )
+        result.append({
+            "path": os.path.relpath(filepath, workspace),
+            "line_start": start,
+            "line_end": end,
+            "content": content,
+            "why": why,
+        })
+
+    return result
+
+
+def _find_files_from_test_imports(workspace: str, fail_to_pass: list[str]) -> list[dict]:
+    """Fallback when tests cannot be run: trace AST imports from test files."""
+    test_files = []
+    for tid in fail_to_pass:
+        file_part = tid.split("::")[0]
+        full = os.path.join(workspace, file_part)
+        if os.path.isfile(full):
+            test_files.append(full)
+    if not test_files:
+        return []
+
+    imported = _build_import_subgraph(workspace, test_files, hops=1)
+    result = []
+    for filepath in imported[:6]:
+        content = _read_file_lines(filepath, max_lines=150)
+        if content:
+            result.append({
+                "path": os.path.relpath(filepath, workspace),
+                "content": content,
+                "why": "imported by failing test",
+            })
+    return result
+
+
+def _run_failing_tests(workspace: str, fail_to_pass: list[str]) -> str:
+    """Run up to 3 failing test IDs and return combined stdout+stderr."""
+    test_ids = fail_to_pass[:3]
+    try:
+        r = subprocess.run(
+            ["python", "-m", "pytest"] + test_ids + ["--tb=long", "-x", "--no-header", "-q"],
+            cwd=workspace,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        return r.stdout + r.stderr
+    except Exception:
+        return ""
+
+
+def _parse_traceback(output: str, workspace: str) -> list[tuple[str, int]]:
+    """Extract (absolute_path, line_number) pairs from Python/pytest traceback output.
+
+    Handles both:
+    - Standard Python:  File "path/to/file.py", line N, in func
+    - pytest short:     path/to/file.py:N: in func
+    """
+    frames: list[tuple[str, int]] = []
+    seen: set[tuple[str, int]] = set()
+
+    def _add(path: str, lineno: int) -> None:
+        if not os.path.isabs(path):
+            path = os.path.join(workspace, path)
+        # Only include files that actually exist inside the workspace
+        try:
+            rel = os.path.relpath(path, workspace)
+        except ValueError:
+            return
+        if rel.startswith(".."):
+            return
+        if os.path.isfile(path):
+            key = (path, lineno)
+            if key not in seen:
+                seen.add(key)
+                frames.append(key)
+
+    # Pattern 1: standard Python traceback
+    for m in re.finditer(r'File "([^"]+)", line (\d+)', output):
+        _add(m.group(1), int(m.group(2)))
+
+    # Pattern 2: pytest short/long format  path/to/file.py:N: in func
+    for m in re.finditer(r'^(\S[^\n:]+\.py):(\d+): in ', output, re.MULTILINE):
+        _add(m.group(1), int(m.group(2)))
+
+    return frames
+
+
+def _build_import_subgraph(
+    workspace: str, seed_files: list[str], hops: int = 1
+) -> list[str]:
+    """Walk import statements from seed_files, returning workspace source files found.
+
+    Uses AST parsing so it works without executing any code. Only follows imports
+    that resolve to actual .py files inside the workspace (stdlib excluded).
+    """
+    found: list[str] = []
+    seen: set[str] = set(seed_files)
+    frontier = list(seed_files)
+
+    for _ in range(hops):
+        next_frontier: list[str] = []
+        for filepath in frontier:
+            try:
+                source = open(filepath, encoding="utf-8", errors="ignore").read()
+                tree = ast.parse(source)
+            except (SyntaxError, OSError):
+                continue
+            for node in ast.walk(tree):
+                if isinstance(node, ast.ImportFrom) and node.module:
+                    cand = _module_to_file(workspace, node.module)
+                    if cand and cand not in seen:
+                        seen.add(cand)
+                        found.append(cand)
+                        next_frontier.append(cand)
+                elif isinstance(node, ast.Import):
+                    for alias in node.names:
+                        cand = _module_to_file(workspace, alias.name)
+                        if cand and cand not in seen:
+                            seen.add(cand)
+                            found.append(cand)
+                            next_frontier.append(cand)
+        frontier = next_frontier
+
+    return found
+
+
+def _module_to_file(workspace: str, module: str) -> str | None:
+    """Resolve a dotted module name to a .py file inside the workspace, or None."""
+    # sympy.core.symbol → sympy/core/symbol.py
+    direct = os.path.join(workspace, module.replace(".", os.sep) + ".py")
+    if os.path.isfile(direct):
+        return direct
+    # sympy.core → sympy/core/__init__.py
+    pkg = os.path.join(workspace, module.replace(".", os.sep), "__init__.py")
+    if os.path.isfile(pkg):
+        return pkg
+    return None
+
+
+def _find_range_around_line(filepath: str, center_line: int, context: int = 80) -> tuple[int, int]:
+    """Find the enclosing function/class body around center_line.
+
+    Walks backward from center_line to find the nearest def/class header,
+    then forward to the next same-level definition. Caps at context lines
+    so we don't dump a 2000-line class body.
+    """
+    try:
+        lines = open(filepath, encoding="utf-8", errors="ignore").readlines()
+    except OSError:
+        half = context // 2
+        return max(1, center_line - half), center_line + half
+
+    n = len(lines)
+    center_line = max(1, min(center_line, n))
+
+    # Walk backward to find nearest def/class at the same or lower indent
+    start = center_line
+    for i in range(center_line - 2, max(-1, center_line - 60), -1):
+        stripped = lines[i].strip()
+        if stripped.startswith(("def ", "class ", "async def ")):
+            start = i + 1  # 1-indexed
+            break
+
+    # Walk forward to find the next top-level boundary
+    indent0 = len(lines[start - 1]) - len(lines[start - 1].lstrip()) if start <= n else 0
+    end = min(n, start + context)
+    for i in range(start, min(n, start + context)):
+        if i >= n:
+            break
+        line = lines[i]
+        if not line.strip() or line.strip().startswith("#"):
+            continue
+        curr_indent = len(line) - len(line.lstrip())
+        if i > start - 1 and curr_indent <= indent0 and line.strip().startswith(
+            ("def ", "class ", "async def ")
+        ):
+            end = i  # exclusive → line i not included
+            break
+
+    return start, min(end, start + context)
+
+
+def _read_file_range(filepath: str, start: int, end: int) -> str:
+    """Read lines [start, end] (1-indexed, inclusive)."""
+    try:
+        lines = open(filepath, encoding="utf-8", errors="ignore").readlines()
+        return "".join(lines[start - 1: end])
+    except OSError:
+        return ""
+
+
+# ── Shared infrastructure (unchanged) ────────────────────────────────────────
+
+
 def fetch_remote_agents_files(task_text: str, workspace: str) -> list[str]:
     """Best-effort fetch of remote AGENTS.md-style rules from GitHub."""
-    del task_text  # Reserved for future filtering; keep API task-aware.
+    del task_text
     try:
         remote = _run_git(["remote", "get-url", "origin"], workspace)
         repo = _parse_github_repo(remote)
@@ -76,30 +387,23 @@ def fetch_remote_agents_files(task_text: str, workspace: str) -> list[str]:
 def _detect_build_commands(workspace: str) -> list[str]:
     cmds: list[str] = []
 
-    # pyproject.toml / setup.cfg -> pytest
     if os.path.exists(os.path.join(workspace, "pyproject.toml")):
         try:
             content = open(os.path.join(workspace, "pyproject.toml")).read()
-            if "pytest" in content:
-                cmds.append("pytest")
-            else:
-                cmds.append("python -m pytest")
+            cmds.append("pytest" if "pytest" in content else "python -m pytest")
         except OSError:
             cmds.append("python -m pytest")
 
-    # Makefile
     mf = os.path.join(workspace, "Makefile")
     if os.path.exists(mf):
         try:
             for line in open(mf).readlines()[:60]:
                 if line.startswith(("test", "check")):
-                    target = line.split(":")[0].strip()
-                    cmds.append(f"make {target}")
+                    cmds.append(f"make {line.split(':')[0].strip()}")
                     break
         except OSError:
             pass
 
-    # package.json
     pj = os.path.join(workspace, "package.json")
     if os.path.exists(pj):
         try:
@@ -111,11 +415,9 @@ def _detect_build_commands(workspace: str) -> list[str]:
         except Exception:
             cmds.append("npm test")
 
-    # go.mod
     if os.path.exists(os.path.join(workspace, "go.mod")):
         cmds.append("go test ./...")
 
-    # Default: try pytest for any .py files
     if not cmds:
         py_files = [f for f in os.listdir(workspace) if f.endswith(".py")]
         if py_files:
@@ -142,9 +444,7 @@ def _run_git(args: list[str], workspace: str) -> str:
         text=True,
         timeout=5,
     )
-    if result.returncode != 0:
-        return ""
-    return result.stdout.strip()
+    return result.stdout.strip() if result.returncode == 0 else ""
 
 
 def _parse_github_repo(remote_url: str) -> tuple[str, str] | None:
@@ -169,98 +469,6 @@ def _candidate_remote_branches(workspace: str) -> list[str]:
         if branch not in branches:
             branches.append(branch)
     return branches
-
-
-def _find_task_adjacent_files(workspace: str, task_text: str, repo_map: str) -> list[dict]:
-    keywords = _task_keywords(task_text)
-    if not keywords:
-        return []
-
-    repo_map_files = set(_extract_repo_map_files(repo_map))
-    repo_files = set(_iter_repo_files(workspace))
-    files = sorted(repo_files | {path for path in repo_map_files if path in repo_files})
-    scored: list[tuple[float, str]] = []
-    for rel_path in files:
-        score = _score_path(rel_path, keywords)
-        if score > 0:
-            scored.append((score, rel_path))
-
-    scored.sort(key=lambda item: (-item[0], item[1]))
-    adjacent: list[dict] = []
-    for score, rel_path in scored[:5]:
-        content = _read_file_lines(os.path.join(workspace, rel_path), max_lines=150)
-        if content:
-            adjacent.append({"path": rel_path, "score": score, "content": content})
-    return adjacent
-
-
-def _task_keywords(task_text: str) -> set[str]:
-    raw_tokens = re.findall(r"[a-zA-Z_][a-zA-Z0-9_]*", task_text)
-    explicit_paths = re.findall(r"[\w./-]+\.[A-Za-z0-9]+", task_text)
-    tokens: set[str] = set()
-
-    for token in raw_tokens:
-        for part in _split_identifier(token):
-            lowered = part.lower()
-            if len(lowered) > 1 and lowered not in _STOPWORDS:
-                tokens.add(lowered)
-
-    for path in explicit_paths:
-        tokens.add(path.lower())
-        _, ext = os.path.splitext(path)
-        if ext:
-            tokens.add(ext.lstrip(".").lower())
-        for part in re.split(r"[/._-]+", path):
-            lowered = part.lower()
-            if len(lowered) > 1 and lowered not in _STOPWORDS:
-                tokens.add(lowered)
-
-    return tokens
-
-
-def _split_identifier(token: str) -> list[str]:
-    pieces: list[str] = []
-    for snake_part in re.split(r"_+", token):
-        pieces.extend(re.findall(r"[A-Z]?[a-z]+|[A-Z]+(?=[A-Z]|$)|\d+", snake_part))
-    return pieces or [token]
-
-
-def _extract_repo_map_files(repo_map: str) -> list[str]:
-    files: set[str] = set()
-    for line in repo_map.splitlines():
-        stripped = line.strip()
-        if not stripped or stripped.startswith("===") or stripped.endswith("/"):
-            continue
-        candidate = stripped.split(":", 1)[0].strip()
-        candidate = candidate.split(" ", 1)[0].strip()
-        if "." in os.path.basename(candidate):
-            files.add(candidate)
-    return sorted(files)
-
-
-def _iter_repo_files(workspace: str) -> list[str]:
-    paths: list[str] = []
-    for dirpath, dirnames, filenames in os.walk(workspace):
-        dirnames[:] = sorted(d for d in dirnames if d not in _SKIP_DIRS)
-        for filename in sorted(filenames):
-            full_path = os.path.join(dirpath, filename)
-            paths.append(os.path.relpath(full_path, workspace))
-    return paths
-
-
-def _score_path(rel_path: str, keywords: set[str]) -> float:
-    lowered_path = rel_path.lower()
-    filename = os.path.basename(lowered_path)
-    dirname = os.path.dirname(lowered_path)
-    score = 0.0
-    for keyword in keywords:
-        if keyword in filename:
-            score += 2.0
-        elif keyword in dirname:
-            score += 1.0
-        elif keyword in lowered_path:
-            score += 1.0
-    return score
 
 
 def _read_file_lines(path: str, max_lines: int) -> str:

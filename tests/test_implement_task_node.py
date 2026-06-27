@@ -17,7 +17,7 @@ def test_implement_task_failure_marks_task_failed():
         result = node.run(state)
 
     assert result.status == "warning"
-    assert result.next_node == "05_CHECKPOINT"
+    assert result.next_node == "VERIFY_FIX"
     assert result.state_update["implementation_done"] is False
     assert result.state_update["task_status"] == "failed"
 

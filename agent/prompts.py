@@ -13,8 +13,11 @@ Core constraints:
 - Do not push, deploy, merge, or publish anything. The pipeline handles that.
 - Report uncertainty and failures honestly. Do not claim success without evidence.
 - Do not modify files unrelated to the task.
-- Progress updates should be brief. Do not narrate your thinking — act.
-- Make exactly one tool call per turn. Do not batch multiple tool calls in a single response.\
+- Make exactly one tool call per turn. Do not batch multiple tool calls in a single response.
+- After each tool result, write ONE sentence: what you now know and what you need next.
+  That sentence is your only allowed narration. Then immediately make the next tool call.
+- Stop repeating the same search: if you've run the same grep or read the same file twice
+  without new findings, write a targeted diagnostic script instead.\
 """
 
 LAYER_2_ENV = """\
@@ -23,7 +26,11 @@ Environment:
 - Shell access via run_shell (commands run in the repo directory).
 - Git is available. Do NOT push or create PRs — the pipeline handles that.
 - You can install missing dependencies with run_shell("pip install X") or similar.
-- _agent_scripts/ is pre-seeded with helpers (docker_run.py). Write your own scripts there for complex/repeated operations.\
+- _agent_scripts/ is pre-seeded with diagnostic helpers:
+    mro_check.py    — dump full Python MRO + __slots__ at every inheritance level
+    import_graph.py — show what a file imports and what imports it
+    docker_run.py   — run commands in an isolated Docker container (if available)
+  Add your own scripts here when a single command can't give you a clear answer.\
 """
 
 LAYER_3_TOOLS = """\
@@ -81,6 +88,48 @@ Custom scripts:
     - Purpose: what it does
     - Problem: what it solves / why a raw bash one-liner isn't enough
     - Usage: exact example invocation(s)\
+"""
+
+LAYER_DIAGNOSTIC_TOOLS = """\
+Diagnostic tool-creation culture:
+
+Write a script in _agent_scripts/ the moment a single bash command won't give you a clean answer.
+Scripts persist across all verification retries — write them once, reuse them.
+
+Every script must open with a docstring: Purpose / Problem / Usage.
+
+Pre-seeded helpers (use these before writing equivalents):
+  python _agent_scripts/mro_check.py pkg.module.ClassName
+      → prints every class in the MRO with its __slots__, immediately shows which ancestor
+        is missing __slots__ = () for an immutability/memory bug
+  python _agent_scripts/import_graph.py path/to/file.py
+      → prints all imports declared IN the file + all workspace files that import IT
+
+Concrete example of good tool-creation behavior (a __slots__ bug):
+  Turn 3  run pytest test_basic.py::test_immutable
+           → FAILED: Symbol() has __dict__ = {'_assumptions': {}}
+           Observation: __slots__ suppression requires EVERY ancestor to declare it — need
+           the full MRO, not just Symbol and Basic.
+  Turn 4  run_shell("python _agent_scripts/mro_check.py sympy.core.symbol.Symbol")
+           → output shows StdFactKB at position 4 is missing __slots__
+  Turn 5  run_shell("grep -n 'class StdFactKB' --include='*.py' -r .")
+           → sympy/core/assumptions.py:45
+  Turn 6  replace_in_file: add __slots__ = () to StdFactKB
+  Turn 7  run pytest → PASSES
+
+What happened before this: 3 subsessions × 20 turns reading symbol.py, basic.py, symbol.py,
+basic.py in a loop — mro_check.py would have solved it on turn 4.
+
+Anti-patterns:
+  - Grepping for the same identifier twice without writing what you found
+  - Reading symbol.py then basic.py then symbol.py again
+  - Trying the same fix (add __slots__ to Symbol) twice after it already failed\
+"""
+
+LAYER_EXISTING_TOOLS_TEMPLATE = """\
+Diagnostic scripts from a previous attempt (still in _agent_scripts/):
+{tools_list}
+Run these before recreating similar tools — they already encode findings from prior iterations.\
 """
 
 LAYER_ADDITIVE_TASK = """\
@@ -165,9 +214,11 @@ Reason: {reason}
 
 Action required:
 - Run run_shell("git diff HEAD") to review what you changed so far.
-- Review the task requirements against your changes.
-- Run the relevant tests via run_shell.
-- Continue until the task is complete or you are genuinely blocked.
+- Run the relevant tests via run_shell to get concrete output.
+- If you've been reading the same files or running the same grep repeatedly,
+  STOP — write a diagnostic script in _agent_scripts/ that gives you the
+  specific answer you need in one shot.
+- Do not declare done without showing passing test output.
 
 Do not stop until you have concrete evidence (test output, diff, verification).
 </system-nudge>\
@@ -180,14 +231,23 @@ Be strict: the task is only done if there is concrete evidence (code changed, te
 """
 
 
-def build_implement_system(state: object, context_bundle: object) -> str:
+def build_implement_system(
+    state: object,
+    context_bundle: object,
+    existing_tools: list[str] | None = None,
+) -> str:
     """Assemble the full system prompt for the IMPLEMENT_TASK subsession."""
     layers = [
         LAYER_1_BASE,
         LAYER_2_ENV.format(working_branch=getattr(state, "working_branch", "unknown")),
         LAYER_3_TOOLS,
         LAYER_BASH_SKILLS,
+        LAYER_DIAGNOSTIC_TOOLS,
     ]
+
+    if existing_tools:
+        tools_list = "\n".join(f"  - {t}" for t in existing_tools)
+        layers.append(LAYER_EXISTING_TOOLS_TEMPLATE.format(tools_list=tools_list))
 
     cb = context_bundle
     if getattr(cb, "repo_rules", None):
@@ -243,7 +303,11 @@ def build_implement_human(state: object) -> str:
                 break
             if len(content) > available:
                 content = content[:available]
-            file_sections.append(f'<file path="{path}">\n{content}\n</file>')
+            line_info = ""
+            if file_info.get("line_start"):
+                line_info = f' lines="{file_info["line_start"]}-{file_info["line_end"]}"'
+            why_info = f' why="{file_info["why"]}"' if file_info.get("why") else ""
+            file_sections.append(f'<file path="{path}"{line_info}{why_info}>\n{content}\n</file>')
             remaining -= wrapper_overhead + len(content)
             if remaining <= 0:
                 break

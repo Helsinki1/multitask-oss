@@ -1,8 +1,12 @@
-"""Node SEED_SCRIPTS: drops _agent_scripts/ into the workspace before the agent starts.
+"""Node SEED_SCRIPTS: drops diagnostic helpers into _agent_scripts/ before the agent starts.
 
-Writes docker_run.py (Docker shell helper) so the agent can spin up an isolated
-container via run_shell without needing to manage container IDs manually.
-Also ensures _agent_scripts/ is in .gitignore so it never leaks into the patch.
+Three scripts are seeded:
+  mro_check.py    — full Python MRO dump with __slots__ at every level (inheritance bugs)
+  import_graph.py — imports in/out of any file (dependency tracing)
+  docker_run.py   — isolated Docker shell (environment isolation)
+
+These are described in LAYER_2_ENV so the agent knows they exist on turn 1.
+_agent_scripts/ is added to .gitignore so helpers never leak into the final patch.
 """
 
 import os
@@ -86,6 +90,95 @@ if __name__ == "__main__":
 '''
 
 
+_MRO_CHECK_PY = '''\
+#!/usr/bin/env python3
+"""
+Purpose: Dump the full Python MRO of a class, showing __slots__ at every level.
+Problem: __slots__/__dict__ bugs require seeing the entire inheritance chain at once.
+         Reading files one by one misses the specific ancestor that causes __dict__ leakage.
+Usage:
+  python _agent_scripts/mro_check.py sympy.core.symbol.Symbol
+  python _agent_scripts/mro_check.py django.db.models.Model
+"""
+import sys, importlib
+
+def main():
+    if len(sys.argv) < 2:
+        print("Usage: mro_check.py <module.path.ClassName>"); sys.exit(1)
+    dotted = sys.argv[1]
+    mod_path, cls_name = dotted.rsplit(".", 1)
+    try:
+        mod = importlib.import_module(mod_path)
+    except ImportError as e:
+        print(f"ERROR importing {mod_path!r}: {e}"); sys.exit(1)
+    cls = getattr(mod, cls_name, None)
+    if cls is None:
+        print(f"ERROR: {cls_name!r} not found in {mod_path!r}"); sys.exit(1)
+    print(f"MRO for {dotted}:\\n")
+    print(f"  {'Class':<45} {'Module':<35} __slots__")
+    print("  " + "-" * 100)
+    for c in cls.__mro__:
+        slots = c.__dict__.get("__slots__", "*** MISSING — instance will have __dict__ ***")
+        print(f"  {c.__name__:<45} {getattr(c, '__module__', '?'):<35} {slots!r}")
+
+if __name__ == "__main__":
+    main()
+'''
+
+_IMPORT_GRAPH_PY = '''\
+#!/usr/bin/env python3
+"""
+Purpose: Show what a file imports, and which workspace files import it.
+Problem: Dependency tracing requires checking both directions; manual grep loses the picture.
+Usage:
+  python _agent_scripts/import_graph.py sympy/core/symbol.py
+  python _agent_scripts/import_graph.py django/db/models/base.py
+"""
+import ast, os, subprocess, sys
+
+def extract_imports(fp):
+    try:
+        tree = ast.parse(open(fp, encoding="utf-8", errors="ignore").read())
+    except (SyntaxError, OSError) as e:
+        return [f"(parse error: {e})"]
+    out = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module:
+            out.append(f"from {node.module} import {', '.join(a.name for a in node.names)}")
+        elif isinstance(node, ast.Import):
+            out.append(f"import {', '.join(a.name for a in node.names)}")
+    return out
+
+def find_dependents(fp, ws):
+    rel = os.path.relpath(fp, ws)
+    patterns = [rel.replace(os.sep, ".").removesuffix(".py"), rel.removesuffix(".py"),
+                os.path.splitext(os.path.basename(fp))[0]]
+    found = set()
+    for pat in patterns:
+        r = subprocess.run(["grep", "-rln", "--include=*.py", pat, ws],
+                           capture_output=True, text=True, timeout=15)
+        for line in r.stdout.splitlines():
+            line = line.strip()
+            if line and os.path.realpath(line) != os.path.realpath(fp):
+                found.add(os.path.relpath(line, ws))
+    return sorted(found)[:20]
+
+if __name__ == "__main__":
+    if len(sys.argv) < 2:
+        print("Usage: import_graph.py <path/to/file.py>"); sys.exit(1)
+    fp = sys.argv[1] if os.path.isabs(sys.argv[1]) else os.path.join(os.getcwd(), sys.argv[1])
+    if not os.path.isfile(fp):
+        print(f"ERROR: {sys.argv[1]} not found"); sys.exit(1)
+    ws = os.getcwd()
+    rel = os.path.relpath(fp, ws)
+    print(f"=== Imports declared IN {rel} ===")
+    for imp in extract_imports(fp): print(f"  {imp}")
+    print(f"\\n=== Workspace files that import {rel} ===")
+    deps = find_dependents(fp, ws)
+    for d in (deps or ["(none found)"]): print(f"  {d}")
+'''
+
+
 class SeedScriptsNode(Node):
     name = "SEED_SCRIPTS"
     node_type = "deterministic"
@@ -95,9 +188,14 @@ class SeedScriptsNode(Node):
         scripts_dir = pathlib.Path(state.workspace_path) / "_agent_scripts"
         scripts_dir.mkdir(exist_ok=True)
 
-        docker_run = scripts_dir / "docker_run.py"
-        docker_run.write_text(_DOCKER_RUN_PY)
-        docker_run.chmod(0o755)
+        for name, content in [
+            ("mro_check.py", _MRO_CHECK_PY),
+            ("import_graph.py", _IMPORT_GRAPH_PY),
+            ("docker_run.py", _DOCKER_RUN_PY),
+        ]:
+            p = scripts_dir / name
+            p.write_text(content)
+            p.chmod(0o755)
 
         self._ensure_gitignore(state.workspace_path)
 
