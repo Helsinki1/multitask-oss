@@ -30,19 +30,35 @@ Purpose: Dump Python MRO + __slots__ at every inheritance level for a class.
 Problem: __slots__ suppression requires EVERY ancestor to declare it — a single
          class missing __slots__ = () causes the whole chain to have __dict__.
 Usage:   python _agent_scripts/mro_check.py sympy.core.symbol.Symbol
+         python _agent_scripts/mro_check.py sympy/core/symbol.py Symbol
 """
 import importlib
 import sys
 
 def main():
     if len(sys.argv) < 2:
-        print("Usage: mro_check.py pkg.module.ClassName")
+        print("Usage: mro_check.py dotted.module.ClassName")
+        print("       mro_check.py path/to/file.py ClassName")
         sys.exit(1)
-    dotted = sys.argv[1]
-    module_path, _, cls_name = dotted.rpartition(".")
-    mod = importlib.import_module(module_path)
+
+    arg = sys.argv[1]
+    if arg.endswith(".py") or "/" in arg:
+        if len(sys.argv) < 3:
+            print("Error: provide a class name after the file path")
+            print("Usage: mro_check.py path/to/file.py ClassName")
+            sys.exit(1)
+        module_path = arg.removesuffix(".py").replace("/", ".")
+        cls_name = sys.argv[2]
+    else:
+        module_path, _, cls_name = arg.rpartition(".")
+
+    try:
+        mod = importlib.import_module(module_path)
+    except ModuleNotFoundError as exc:
+        print(f"Error: cannot import {module_path!r}: {exc}")
+        sys.exit(1)
     cls = getattr(mod, cls_name)
-    print(f"MRO for {dotted}:")
+    print(f"MRO for {module_path}.{cls_name}:")
     for c in cls.__mro__:
         slots = getattr(c, "__slots__", "** MISSING **")
         print(f"  {c.__module__}.{c.__name__}  __slots__ = {slots!r}")
@@ -119,8 +135,7 @@ def _seed_agent_scripts(workspace: str) -> None:
 
     for name, content in [("mro_check.py", _MRO_CHECK), ("import_graph.py", _IMPORT_GRAPH)]:
         p = scripts_dir / name
-        if not p.exists():
-            p.write_text(content)
+        p.write_text(content)  # always overwrite so fixes to seeded scripts take effect
 
 
 def _collect_agent_scripts(workspace: str) -> list[str]:
