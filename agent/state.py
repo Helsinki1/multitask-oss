@@ -129,6 +129,7 @@ class AgentState:
     # Retry state
     verify_attempts: int = 0
     verify_failure_type: str = ""  # "f2p_failing" | "p2p_regression" | ""
+    baseline_p2p_failing: list[str] = field(default_factory=list)  # p2p tests failing BEFORE any agent changes
 
     # Eval mode (SWE-bench etc.)
     eval_mode: bool = False

@@ -43,6 +43,7 @@ class SubsessionResult:
 
 _COMPRESS_AFTER_TURN = 20
 _KEEP_RECENT_TURNS = 6
+_PROBE_LOOP_THRESHOLD = 4  # consecutive run_shell turns without a file edit → inject nudge
 
 
 def _token_limit_kwargs(model: str, max_tokens: int) -> dict[str, int]:
@@ -80,6 +81,7 @@ def run_subsession(
     start_time = time.time()
     total_cost = 0.0
     last_text = ""
+    consecutive_probes = 0  # turns with only run_shell, no file edit
 
     for turn in range(config.max_turns):
         if time.time() - start_time > config.max_wall_seconds:
@@ -185,6 +187,14 @@ def run_subsession(
         messages.append(assistant_msg)
 
         if choice.finish_reason == "tool_calls" and msg.tool_calls:
+            # Track probe-loop: consecutive run_shell turns without file edits
+            tool_names = {tc.function.name for tc in msg.tool_calls}
+            file_edit_tools = {"write_file", "replace_in_file"}
+            if tool_names <= {"run_shell"} and not (tool_names & file_edit_tools):
+                consecutive_probes += 1
+            else:
+                consecutive_probes = 0
+
             for tc in msg.tool_calls:
                 args = json.loads(tc.function.arguments)
                 result_str = registry.execute(tc.function.name, args, state.workspace_path)
@@ -202,6 +212,18 @@ def run_subsession(
                     "tool_call_id": tc.id,
                     "content": result_str,
                 })
+
+            # Inject a nudge if the agent has been probing without making any edits
+            if consecutive_probes >= _PROBE_LOOP_THRESHOLD:
+                nudge = (
+                    f"[harness] You have run {consecutive_probes} consecutive shell commands "
+                    "without editing any source file. You must make a targeted file edit now. "
+                    "Pick the most likely location, form a concrete hypothesis, and use "
+                    "replace_in_file or write_file. Probing further will not fix the bug."
+                )
+                messages.append({"role": "user", "content": nudge})
+                tracer.emit("probe_loop.nudge", {"consecutive_probes": consecutive_probes, "turn": turn})
+                consecutive_probes = 0  # reset after nudge to avoid spamming
         else:
             # Model produced a text response — implementation turn is complete
             return SubsessionResult(

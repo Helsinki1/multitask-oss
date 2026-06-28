@@ -10,6 +10,9 @@ Done
 * added a simple classifier for "bug fix" vs "additive" tasks --- leading to different agent node traversals
 * after every IMPLEMENT subsession, the agent gathers all the context it gathered and puts it in ContextBundle dict to pass to the next IMPLEMENT session, reducing re-reads (compress still applies after 20th turns)
 * after every IMPLEMENT subsession, the agent writes notes to itself that it injects into its instruction prompts in the next session
+* use majority-vote grep algorithm to map swe-bench's test IDs (plain function names) to file path where test is located (for proper execution and traceback) -- this is on a per-test-ID basis
+* make import-graph (dep graph) hopping go deeper than just 1-hop traceback
+* 
 
 Improvements
 1. better testing environment: running tests / subagent sessions are all via "git worktree add -b" instead of a separate docker container that requires cold start
@@ -76,31 +79,8 @@ wrong: letting llm write desired behavior w/o strict verifiable contracts (test-
 - 3 retry + verify attempts ARENT enough, swe-bench cases that regress need a lot more reasoning steps
 
 
------------------------------------------------------------------------------------------------------------------------
-
+-------------------------------------------------------------------------------------------------
 HILLCLIMB SESSION — sympy__sympy-20590
-
-DIAGNOSED ISSUES:
-
-1. SWE-bench Lite test IDs are often bare function names (e.g. "test_immutable") or Django-format strings — VERIFY was running `pytest test_immutable` which returns a collection error (no tests found), so VERIFY always reported failures regardless of whether the agent's fix was correct.
-
-2. Without majority-vote file resolution, bare test names like `test_equality` or `test_subs` can grep-match multiple test files across a large repo — the wrong file gets selected, causing false p2p regressions that don't reflect actual code breakage.
-
-3. When a test failure is a simple assertion error (e.g. `assert not hasattr(b1, '__dict__')`), the traceback only points to the test file — context gathering's import-graph hop only started from source files, so it found nothing useful and gave the agent no preloaded source context.
-
-4. The `verify.result` tracer event was never printed to stderr, making it invisible which specific tests were failing — diagnosing p2p regressions required guessing from the agent's behavior rather than reading the actual failing test IDs.
-
-5. The agent's `mro_check.py` usage was confused across attempts because the tool docstring described two incompatible calling conventions — wasting 2–3 turns per attempt on failed tool invocations before the agent figured out the right syntax.
-
-
-GROUNDBREAKING STRATEGIES:
-
-1. Test ID resolution with majority-vote file detection. SWE-bench ships test IDs as bare function names (sympy) or Django-format strings (django). Running `pytest test_immutable` errors with "no tests collected." The fix: grep all test IDs across the repo and use majority-vote to find the file that contains the most of them. All 22 test IDs (1 f2p + 21 p2p) pointed overwhelmingly to `test_basic.py`. With the correct full path `sympy/core/tests/test_basic.py::test_immutable`, VERIFY actually ran the test, the agent got real tracebacks, and the problem went from 5 failed attempts to 1 successful attempt in 9 turns at $0.05.
-
-2. Import-graph hopping from test files as a fallback for context gathering. When a test fails with a simple assertion error (`assert not hasattr(b1, '__dict__')`), the traceback only mentions the test file — there's no stack trace into source code. The original context gatherer only walked one import-graph hop from SOURCE files (and found nothing). Fixing this to also hop from test files when no source files appear in the traceback gave the agent `basic.py` preloaded as context, pointing it directly toward the Printable class and the missing `__slots__`.
-
-3. Resolve test IDs as a combined batch (f2p + p2p together) before they enter any system component. Resolving f2p (1 ID) and p2p (21 IDs) separately means the majority vote for f2p is weak (only 1 data point). By concatenating all 22 IDs and resolving them in one call, the majority vote has 22× stronger signal — the correct test file wins unambiguously even when common names like `test_equality` or `test_subs` appear in many other test files. This prevented false p2p regressions that were causing the agent to oscillate between fixing and reverting.
-
 
 The harness currently assumes pytest for everything. Even after resolving a Django test ID to tests/app/test_foo.py::TestClass::test_method, that only works if pytest-django is installed and DJANGO_SETTINGS_MODULE is set. The resolution is one layer — the runner assumption is another.
 
@@ -108,3 +88,51 @@ For a truly generalizable harness you'd need:
 1. Test runner detection — check for pytest.ini, manage.py, go.mod, package.json test scripts, etc.
 2. ID normalization per runner — convert bare IDs to the native format for that runner
 3. Runner-aware execution — pytest, python -m django test, go test -run, npm test -- --testNamePattern= etc.
+
+the right abstraction is a TestRunner interface with resolve_id() and run_test() methods, selected by detecting the project's test infrastructure — rather than assuming pytest universally.
+
+-------------------------------------------------------------------------------------------------
+HILLCLIMB SESSION — sympy__sympy-12236, sympy__sympy-12454, sympy__sympy-11897
+
+ISSUES DIAGNOSED:
+
+1. Oscillation / context thrashing: When the agent's fix for the f2p bug introduces p2p regressions,
+   GATHER_CONTEXT re-enters and REPLACES the entire context bundle with regression traceback files,
+   discarding the prior context. The next IMPLEMENT then reverts the original fix to clear the
+   regression, and the cycle repeats until MAX_VERIFY_ATTEMPTS is exhausted.
+
+2. Massive p2p token bloat: A structural regression (e.g. modifying a method signature) can break
+   100+ tests in one file. Showing all failing tests with full tracebacks inflates LLM input to
+   ~30k tokens per turn — 4x the cost and drowning the signal in noise.
+
+3. Probe loop / empirical spinning: The agent runs 9+ consecutive run_shell/Python probes to
+   understand a function's behavior without making any source file edits, burning turns that should
+   be used for targeted fixes.
+
+4. No "don't revert" guard on p2p retry: When re-entering IMPLEMENT after a p2p regression, the
+   agent had no explicit signal that the f2p tests were NOW PASSING, so it would revert the working
+   polys/source fix to clear the regression rather than finding a unified solution.
+
+INNOVATIONS / FIXES MADE:
+
+Strategy A — Anti-oscillation (3 items)
+
+These address the same root cause (agent reverts working fix when p2p regressions fire):
+
+- #1 Context preservation in p2p re-entry: Load-bearing. Without it, GATHER_CONTEXT wipes the context bundle and the agent loses sight of what it was fixing. This is the direct fix for the oscillation mechanism.
+- #8 Baseline p2p tracking + routing: Load-bearing. Changed 12454 from 23 false p2p regressions (triggering oscillation) to 0 newly_failing. This is what actually stopped the loop.
+- #2 "CRITICAL: do not revert" in p2p retry prompt (prompts.py): _BUGFIX_RETRY_P2P opens with an
+   explicit warning that f2p tests are NOW PASSING — agent must keep current changes and find a
+   unified fix, not revert.
+
+Strategy B — Token budget / signal density (3 items)
+
+- #3 Capped p2p list: Load-bearing. 100+ tests × full tracebacks = 30k tokens. Max 5 shown is clearly the right call.
+
+Strategy C — Harness guardrails (3 items)
+                                                                                                                                           
+- #7 Git revert + prefer replace_in_file: Load-bearing.git checkout HEAD -- polyclasses.py at turn 29 and immediately found the right fix. Agents were consistently using fragile Python heredoc patches instead of replace_in_file — the guidance changed that behavior.
+- #9 Budget-exhausted no-op: Load-bearing in its narrowness. Directly observed in bp37b3wp8: IMPLEMENT with 0 turns → CHECKPOINT instead of 3 empty VERIFY loops. Small but clean.
+- #5 Programmatic probe-loop nudge (subsession.py): After 4 consecutive run_shell calls without any
+   file edit, the harness injects a forced-edit message. Addresses agents that empirically spin
+   through 10+ probes without making progress.

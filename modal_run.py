@@ -165,6 +165,52 @@ def run_one(
 
 
 @app.local_entrypoint()
+def run_repo(
+    repo: str = "sympy/sympy",
+    limit: int = 10,
+    max_turns: int = 60,
+    max_cost: float = 50.0,
+    dataset: str = "princeton-nlp/SWE-bench_Lite",
+    split: str = "test",
+    results_file: str = "results.jsonl",
+) -> None:
+    """Run the first --limit instances from a specific repo in parallel on Modal.
+
+    modal run modal_run.py::run_repo --repo sympy/sympy --limit 10
+    """
+    from datasets import load_dataset
+
+    ds = load_dataset(dataset, split=split)
+    ids = [row["instance_id"] for row in ds if row["repo"] == repo][:limit]
+    if not ids:
+        print(f"ERROR: no instances found for repo {repo!r}", file=sys.stderr)
+        sys.exit(1)
+
+    print(f"Found {len(ids)} instances for {repo}: {ids}")
+
+    static_kwargs = {"max_turns": max_turns, "max_cost": max_cost, "dataset": dataset, "split": split}
+
+    out = Path(results_file)
+    passed = failed = errors = 0
+
+    with out.open("w") as f:
+        for result in run_instance.map(ids, kwargs=static_kwargs, order_outputs=False):
+            f.write(json.dumps(result) + "\n")
+            f.flush()
+            o = result.get("outcome", "?")
+            if o == "pass":
+                passed += 1
+            elif o == "fail":
+                failed += 1
+            else:
+                errors += 1
+            print(f"  [{passed+failed+errors}/{len(ids)}] {result['instance_id']} → {o}")
+
+    print(f"\nDone. pass={passed} fail={failed} errors={errors}")
+    print(f"Results written to {out}")
+
+
+@app.local_entrypoint()
 def run_batch(
     ids_file: str = "ids.txt",
     max_turns: int = 60,
@@ -190,17 +236,13 @@ def run_batch(
 
     print(f"Submitting {len(ids)} instances in parallel...")
 
-    kwargs_list = [
-        {"instance_id": iid, "max_turns": max_turns, "max_cost": max_cost,
-         "dataset": dataset, "split": split}
-        for iid in ids
-    ]
+    static_kwargs = {"max_turns": max_turns, "max_cost": max_cost, "dataset": dataset, "split": split}
 
     out = Path(results_file)
     passed = failed = errors = 0
 
     with out.open("w") as f:
-        for result in run_instance.map(kwargs_list, kwargs=True, order_outputs=False):
+        for result in run_instance.map(ids, kwargs=static_kwargs, order_outputs=False):
             f.write(json.dumps(result) + "\n")
             f.flush()
             o = result.get("outcome", "?")

@@ -36,15 +36,22 @@ class VerifyNode(Node):
         updated_todo = TestToDoList(cases=updated_cases)
 
         f2p_failing = updated_todo.f2p_failing
-        p2p_failing = updated_todo.p2p_failing
+        baseline_set = set(state.baseline_p2p_failing)
+        # Newly-broken: agent caused these (triggers regression routing → GATHER_CONTEXT)
+        newly_failing = [c for c in updated_todo.p2p_failing if c.test_id not in baseline_set]
+        # Baseline-still-failing: were broken before agent started; agent must also fix them
+        # but they are NOT regressions (don't trigger GATHER_CONTEXT)
+        baseline_still_failing = [c for c in updated_todo.p2p_failing if c.test_id in baseline_set]
 
         self.tracer.emit("verify.result", {
             "summary": updated_todo.summary(),
             "f2p_failing": [c.test_id for c in f2p_failing],
-            "p2p_failing": [c.test_id for c in p2p_failing],
+            "p2p_newly_failing": [c.test_id for c in newly_failing],
+            "p2p_baseline_still_failing": len(baseline_still_failing),
         })
 
-        if not f2p_failing and not p2p_failing:
+        # Full success: f2p pass, no new regressions, AND all baseline tests now pass
+        if not f2p_failing and not newly_failing and not baseline_still_failing:
             self.tracer.emit("verify.passed", {})
             return NodeResult(
                 next_node="CHECKPOINT",
@@ -60,19 +67,23 @@ class VerifyNode(Node):
                 state_update={
                     "todo_list": updated_todo,
                     "verify_attempts": new_attempt,
-                    "verify_failure_type": _failure_type(f2p_failing, p2p_failing),
+                    "verify_failure_type": _failure_type(f2p_failing, newly_failing),
                 },
                 status="warning",
             )
 
-        # Prioritize: if fail_to_pass tests are still failing, fix the implementation.
-        # Only route to GATHER_CONTEXT for regression if f2p tests are actually passing.
-        if f2p_failing:
+        # Routing priority:
+        # 1. New regressions (agent broke something) → GATHER_CONTEXT for regression context
+        # 2. f2p still failing OR baseline tests still failing → IMPLEMENT (fix is incomplete)
+        if newly_failing:
+            failure_type = "p2p_regression"
+            next_node = "GATHER_CONTEXT"
+        elif f2p_failing or baseline_still_failing:
             failure_type = "f2p_failing"
             next_node = "IMPLEMENT"
         else:
-            failure_type = "p2p_regression"
-            next_node = "GATHER_CONTEXT"
+            failure_type = ""
+            next_node = "CHECKPOINT"
 
         self.tracer.emit("verify.retry", {
             "attempt": new_attempt,

@@ -266,6 +266,16 @@ class ImplementNode(Node):
             "cost_usd": result.total_cost_usd,
         })
 
+        # If budget was already exhausted before this subsession did any work, skip VERIFY
+        # and go straight to CHECKPOINT — avoids burning MAX_VERIFY_ATTEMPTS on empty loops.
+        if result.status == "budget_exhausted" and result.total_turns == 0:
+            self.tracer.emit("implement.budget_exhausted_noop", {})
+            return NodeResult(
+                next_node="CHECKPOINT",
+                state_update={"budgets": updated_state.budgets},
+                status="warning",
+            )
+
         # Carry forward files the agent read this attempt into the context bundle
         existing_paths = {f["path"] for f in state.context_bundle.task_adjacent_files}
         new_files = _extract_agent_read_files(result.messages, ws, existing_paths)

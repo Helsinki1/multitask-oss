@@ -9,10 +9,11 @@ already stored in the TestToDoList.
 """
 
 from __future__ import annotations
+import os
 
-from agent.context import build_bugfix_context, rebuild_context_from_regressions
+from agent.context import _read_file_lines, build_bugfix_context, rebuild_context_from_regressions
 from agent.runtime import Node, NodeResult
-from agent.state import AgentState
+from agent.state import AgentState, ContextBundle
 from observability.tracer import Tracer
 
 
@@ -33,8 +34,38 @@ class GatherContextNode(Node):
                 "p2p_failing": [c.test_id for c in state.todo_list.p2p_failing],
             })
             cb = rebuild_context_from_regressions(ws, state.todo_list)
+
+            # Merge: preserve prior context files so the agent keeps visibility into
+            # what it was already working on. Re-read from disk to get current state
+            # (agent may have modified these files during the prior IMPLEMENT pass).
+            new_paths = {f["path"] for f in cb.task_adjacent_files}
+            prior_files_refreshed = []
+            for pf in state.context_bundle.task_adjacent_files:
+                if pf["path"] in new_paths:
+                    continue
+                abs_path = os.path.join(ws, pf["path"])
+                if not os.path.isfile(abs_path):
+                    continue
+                content = _read_file_lines(abs_path, max_lines=120)
+                if content:
+                    prior_files_refreshed.append({
+                        "path": pf["path"],
+                        "content": content,
+                        "why": "from prior attempt (current on-disk state — do not revert)",
+                    })
+                if len(prior_files_refreshed) >= 5:
+                    break
+
+            cb = ContextBundle(
+                repo_rules=cb.repo_rules or state.context_bundle.repo_rules,
+                build_and_test_commands=cb.build_and_test_commands,
+                repo_map=cb.repo_map or state.context_bundle.repo_map,
+                task_adjacent_files=cb.task_adjacent_files + prior_files_refreshed,
+            )
+
             self.tracer.emit("gather_context.done", {
                 "context_files": [f["path"] for f in cb.task_adjacent_files],
+                "prior_files_preserved": [f["path"] for f in prior_files_refreshed],
                 "mode": "regression",
             })
             return NodeResult(
@@ -62,11 +93,24 @@ class GatherContextNode(Node):
             "mode": "initial",
         })
 
+        # Capture which p2p tests were already failing at baseline (before agent makes changes).
+        # VERIFY uses this to avoid treating pre-existing failures as regressions.
+        baseline_failing = [
+            c.test_id for c in todo_list.cases
+            if c.category == "pass_to_pass" and c.status == "failing"
+        ]
+        if baseline_failing:
+            self.tracer.emit("gather_context.baseline_p2p_failing", {
+                "count": len(baseline_failing),
+                "test_ids": baseline_failing[:10],  # log first 10
+            })
+
         return NodeResult(
             next_node="IMPLEMENT",
             state_update={
                 "todo_list": todo_list,
                 "context_bundle": cb,
+                "baseline_p2p_failing": baseline_failing,
             },
             status="ok",
         )

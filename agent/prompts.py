@@ -32,9 +32,14 @@ Environment:
     import_graph.py — show what a file imports and what imports it
   Write additional helpers here when a single bash command gives an unclear answer.
   Every new script must open with: Purpose / Problem / Usage docstring.
-- Before finishing, write key observations to _agent_scripts/notes.md using run_shell.
-  Example: run_shell("cat > _agent_scripts/notes.md << 'EOF'\\nTried X, broke Y because Z\\nEOF")
-  These notes carry forward verbatim to your next attempt.\
+- Before finishing, write structured notes to _agent_scripts/notes.md using run_shell.
+  Use this template:
+    Root cause: <what the actual bug is>
+    Files modified: <which files you changed and why>
+    What worked: <approaches that made progress>
+    What didn't work: <approaches that failed and why>
+    Next hypothesis: <what to try if this attempt fails>
+  These notes carry forward verbatim to your next attempt — make them actionable.\
 """
 
 _TOOLS = """\
@@ -42,7 +47,18 @@ Tools:
 - run_shell: run any bash command (grep, find, git, pytest, pip install, etc.)
 - read_file: read a file with line numbers; use start_line/end_line to slice large files
 - write_file: create a new file (not for overwriting)
-- replace_in_file: exact-text replacement in an existing file\
+- replace_in_file: exact-text replacement in an existing file
+
+IMPORTANT — editing files:
+  Prefer replace_in_file over Python inline patches (python -c / heredoc in run_shell).
+  replace_in_file is atomic, easily reversible, and does not fail from shell quoting issues.
+  Only use inline Python for complex transforms that require string operations across the whole file.
+
+Useful git commands:
+- git diff HEAD          — see all your changes so far
+- git diff HEAD -- path  — see changes to a specific file
+- git checkout HEAD -- path/to/file.py  — fully revert a file to pre-edit state
+  (use this instead of trying to reverse replace_in_file calls — much safer)\
 """
 
 _SAFETY = """\
@@ -60,7 +76,7 @@ Your objective: make ALL fail_to_pass tests pass without breaking any pass_to_pa
 
 Fail-to-pass tests (must go from failing → passing):
 {f2p_list}
-
+{baseline_section}
 Pass-to-pass tests (were passing before — must stay passing):
 {p2p_id_list}
 
@@ -90,17 +106,21 @@ Fix the still-failing tests. Use their exact test IDs to spot-check — not a ke
 _BUGFIX_RETRY_P2P = """\
 RETRY (attempt {attempt} of 5) — your fix caused pass_to_pass regressions.
 
+CRITICAL: The fail_to_pass tests are currently PASSING (shown below). Your existing
+changes fixed them. Do NOT revert any of your current changes — they are correct.
+Your only job now is to also fix the regressions WITHOUT undoing your original fix.
+
+fail_to_pass status (these are NOW PASSING — preserve this):
+{f2p_status_list}
+
 pass_to_pass regressions (were passing before your change, now failing):
 {p2p_failing_list}
-
-fail_to_pass status:
-{f2p_status_list}
 
 Your changes so far (git diff HEAD):
 {diff}
 
 Context files have been re-derived from the regression tracebacks.
-Fix the regression without undoing your original fix — or find a unified solution.\
+Find a unified solution: keep your original fix AND stop the regression.\
 """
 
 
@@ -167,30 +187,50 @@ def build_bugfix_system(state: AgentState) -> str:
         layers.append(f"Repository rules:\n{rules}")
 
     f2p_failing = state.todo_list.f2p_failing
-    p2p_failing = state.todo_list.p2p_failing
+    # Exclude baseline-failing p2p tests (broken before agent started, not regressions)
+    baseline_set = set(state.baseline_p2p_failing)
+    p2p_failing = [c for c in state.todo_list.p2p_failing if c.test_id not in baseline_set]
 
     if state.verify_attempts == 0:
         # First attempt — show objective with all f2p tests and their tracebacks
         f2p_list = _format_test_list(f2p_failing if f2p_failing else state.todo_list.cases)
+        # Build baseline section: tests that were already failing before agent started.
+        # These are caused by the same underlying bug — agent must fix them too.
+        # Cap at 20 to avoid overwhelming the agent when there are 100+ contamination failures.
+        baseline_set = set(state.baseline_p2p_failing)
+        effective_p2p = [tid for tid in state.pass_to_pass if tid not in baseline_set]
+        baseline_section = _format_baseline_section(state.baseline_p2p_failing)
         layers.append(_BUGFIX_OBJECTIVE.format(
             f2p_list=f2p_list,
-            p2p_id_list=_format_p2p_id_list(state.pass_to_pass),
+            baseline_section=baseline_section,
+            p2p_id_list=_format_p2p_id_list(effective_p2p),
         ))
     elif state.verify_failure_type == "f2p_failing":
         diff = _get_diff(state.workspace_path)
+        # Also show baseline tests that are still failing (treated like f2p, not regressions)
+        baseline_still_failing = [
+            c for c in state.todo_list.p2p_failing if c.test_id in baseline_set
+        ]
+        extra_baseline = ""
+        if baseline_still_failing:
+            ids = "\n".join(f"  {c.test_id}" for c in baseline_still_failing[:10])
+            extra = f"  ... and {len(baseline_still_failing) - 10} more" if len(baseline_still_failing) > 10 else ""
+            extra_baseline = (
+                f"\nAdditionally-failing (same underlying bug — also needs fixing):\n{ids}\n{extra}\n"
+            )
         layers.append(_BUGFIX_RETRY_F2P.format(
             attempt=state.verify_attempts,
-            f2p_status_list=_format_f2p_status(state.todo_list.cases),
+            f2p_status_list=_format_f2p_status(state.todo_list.cases) + extra_baseline,
             p2p_warning=_format_p2p_warning(p2p_failing),
-            diff=diff[:3000],
+            diff=diff[:6000],
         ))
     else:  # p2p_regression
         diff = _get_diff(state.workspace_path)
         layers.append(_BUGFIX_RETRY_P2P.format(
             attempt=state.verify_attempts,
-            p2p_failing_list=_format_test_list(p2p_failing),
+            p2p_failing_list=_format_p2p_capped(p2p_failing),
             f2p_status_list=_format_f2p_status(state.todo_list.cases),
-            diff=diff[:3000],
+            diff=diff[:6000],
         ))
 
     layers.append(_SAFETY)
@@ -250,7 +290,11 @@ def build_implement_human(state: AgentState) -> str:
             if remaining <= 0:
                 break
         if sections:
-            parts.append("Pre-loaded context files:\n" + "\n".join(sections))
+            parts.append(
+                "Pre-loaded context files (extracted from traceback frames — "
+                "start here; use read_file to inspect additional sections):\n"
+                + "\n".join(sections)
+            )
 
     parts.append("Begin implementing. Make tool calls to inspect and edit the code.")
     return "\n\n".join(parts)
@@ -311,12 +355,15 @@ def _format_p2p_warning(p2p_failing: list) -> str:
     if not p2p_failing:
         return ""
     lines = ["WARNING — your changes also broke pass_to_pass tests (regressions):"]
-    for c in p2p_failing:
+    # Cap at 3 tests with tracebacks to avoid exploding the f2p retry prompt
+    for c in p2p_failing[:3]:
         lines.append(f"  [FAIL] {c.test_id}")
         if c.traceback:
             tb_lines = c.traceback.strip().splitlines()
-            snippet = "\n".join(tb_lines[-15:])
-            lines.append(f"  Traceback (last 15 lines):\n{_indent(snippet, '    ')}")
+            snippet = "\n".join(tb_lines[-10:])
+            lines.append(f"  Traceback (last 10 lines):\n{_indent(snippet, '    ')}")
+    if len(p2p_failing) > 3:
+        lines.append(f"  ... and {len(p2p_failing) - 3} more regressions (omitted)")
     lines.append("Keep these in mind — do not make them worse while fixing f2p.")
     return "\n".join(lines) + "\n\n"
 
@@ -332,6 +379,63 @@ def _format_test_list(cases: list) -> str:
             # Show last 30 lines of traceback (most relevant part)
             snippet = "\n".join(tb_lines[-30:])
             parts.append(f"  Traceback (last 30 lines):\n{_indent(snippet, '    ')}")
+    return "\n".join(parts)
+
+
+def _format_baseline_section(baseline_failing: list[str]) -> str:
+    """Format baseline-failing p2p tests that the agent must also fix (same underlying bug).
+
+    Capped at 5 shown + summary to avoid overwhelming the agent with contamination cases.
+    """
+    if not baseline_failing:
+        return ""
+    shown = baseline_failing[:5]
+    lines = ["Additionally-failing tests (same underlying bug — fix these too):"]
+    for tid in shown:
+        lines.append(f"  {tid}")
+    if len(baseline_failing) > 5:
+        lines.append(f"  ... and {len(baseline_failing) - 5} more")
+    lines.append("")
+    return "\n".join(lines) + "\n"
+
+
+def _format_p2p_capped(cases: list, max_shown: int = 5) -> str:
+    """Format p2p failures with tracebacks, capped to avoid context explosion.
+
+    When 100+ tests fail in one file (structural regression), showing all of them
+    inflates token usage without providing useful signal. Show the first few with
+    tracebacks, then summarize the rest grouped by test file.
+    """
+    if not cases:
+        return "  (none)"
+
+    from collections import Counter
+    file_counts: Counter = Counter()
+    for c in cases:
+        parts = c.test_id.split("::")
+        file_counts[parts[0]] += 1
+
+    shown = cases[:max_shown]
+    parts: list[str] = []
+    for c in shown:
+        parts.append(f"  {c.test_id}  [{c.status}]")
+        if c.traceback:
+            tb_lines = c.traceback.strip().splitlines()
+            snippet = "\n".join(tb_lines[-20:])
+            parts.append(f"  Traceback (last 20 lines):\n{_indent(snippet, '    ')}")
+
+    remaining = len(cases) - max_shown
+    if remaining > 0:
+        parts.append(
+            f"\n  ... and {remaining} more regression(s) — breakdown by file:"
+        )
+        for filepath, count in file_counts.most_common():
+            parts.append(f"    {filepath}: {count} failing")
+        parts.append(
+            "  These regressions likely share the same root cause as the examples above."
+            " Fix the structural issue rather than patching each test individually."
+        )
+
     return "\n".join(parts)
 
 

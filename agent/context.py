@@ -258,7 +258,7 @@ def _run_and_collect(
     fail_to_pass: list[str],
     pass_to_pass: list[str],
 ) -> tuple[TestToDoList, list[str]]:
-    """Run all tests, build initial TestToDoList, return list of traceback-source files."""
+    """Run all tests, build initial TestToDoList, return (file, anchor_line) pairs."""
     cases: list[TestCase] = []
     all_tb_text = ""
 
@@ -334,12 +334,15 @@ def _parse_traceback(output: str, workspace: str) -> list[tuple[str, int]]:
 
 
 def _dedupe_frames(frames: list[tuple[str, int]], workspace: str) -> list[str]:
-    """Return unique file paths from traceback frames: source files first, test files last."""
+    """Return unique file paths: source files first, test files last.
+
+    Also adds one import-graph hop from source files to pick up related modules.
+    """
     seen: set[str] = set()
     source_files: list[str] = []
     test_files: list[str] = []
 
-    for path, _ in frames:
+    for path, _lineno in frames:
         if path in seen:
             continue
         seen.add(path)
@@ -349,13 +352,10 @@ def _dedupe_frames(frames: list[tuple[str, int]], workspace: str) -> list[str]:
         else:
             source_files.append(path)
 
-    # One import-graph hop from source files; if no source files in traceback
-    # (e.g. simple assertion failures), hop from test files to find source context.
     hop_seeds = source_files[:6] if source_files else test_files[:3]
     imported = _build_import_subgraph(workspace, hop_seeds, hops=1)
     imported_source = [f for f in imported if not any("test" in p.lower() for p in f.replace("\\", "/").split("/"))]
-    all_files = source_files + [f for f in imported_source if f not in seen]
-    all_files += test_files
+    all_files = source_files + [f for f in imported_source if f not in seen] + test_files
 
     return all_files[:12]
 
@@ -433,12 +433,17 @@ def _module_to_file(workspace: str, module: str) -> str | None:
 # ── Internal: file loading ────────────────────────────────────────────────────
 
 
-def _load_context_files(workspace: str, file_paths: list[str]) -> list[dict]:
+def _load_context_files(
+    workspace: str,
+    file_paths: list[str],
+    max_lines: int = 150,
+) -> list[dict]:
+    """Load context files, reading up to max_lines lines with line numbers."""
     result: list[dict] = []
     for filepath in file_paths:
         if not os.path.isfile(filepath):
             continue
-        content = _read_file_lines(filepath, max_lines=200)
+        content = _read_file_lines(filepath, max_lines=max_lines)
         if content:
             result.append({
                 "path": os.path.relpath(filepath, workspace),
@@ -452,11 +457,11 @@ def _read_file_lines(path: str, max_lines: int) -> str:
     try:
         lines: list[str] = []
         with open(path, "r", encoding="utf-8", errors="ignore") as f:
-            for idx, line in enumerate(f):
-                if idx >= max_lines:
-                    lines.append(f"... ({idx} more lines)\n")
-                    break
-                lines.append(line)
+            all_lines = f.readlines()
+        for idx, line in enumerate(all_lines[:max_lines]):
+            lines.append(f"{idx + 1:4d} | {line}")
+        if len(all_lines) > max_lines:
+            lines.append(f"... ({len(all_lines) - max_lines} more lines)\n")
         return "".join(lines)
     except OSError:
         return ""
