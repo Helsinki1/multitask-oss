@@ -27,9 +27,14 @@ Environment:
 - Shell: run_shell (runs in repo root). Git is available.
 - _agent_scripts/ is pre-seeded with diagnostic helpers:
     mro_check.py    — dump Python MRO + __slots__ at every inheritance level
+                      accepts: mro_check.py pkg.module.ClassName
+                               mro_check.py path/to/file.py ClassName
     import_graph.py — show what a file imports and what imports it
   Write additional helpers here when a single bash command gives an unclear answer.
-    Every new script must open with: Purpose / Problem / Usage docstring.\
+  Every new script must open with: Purpose / Problem / Usage docstring.
+- Before finishing, write key observations to _agent_scripts/notes.md using run_shell.
+  Example: run_shell("cat > _agent_scripts/notes.md << 'EOF'\\nTried X, broke Y because Z\\nEOF")
+  These notes carry forward verbatim to your next attempt.\
 """
 
 _TOOLS = """\

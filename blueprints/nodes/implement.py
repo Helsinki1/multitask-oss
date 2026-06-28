@@ -8,6 +8,7 @@ Does NOT assess its own completion — that is handled deterministically by VERI
 
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 
@@ -17,7 +18,7 @@ from agent.prompts import (
     build_implement_human,
 )
 from agent.runtime import Node, NodeResult
-from agent.state import AgentState
+from agent.state import AgentState, ContextBundle
 from agent.subsession import SubsessionConfig, run_subsession
 from cloud_agent.config import settings
 from observability.tracer import Tracer
@@ -161,6 +162,57 @@ def _collect_agent_scripts(workspace: str) -> list[str]:
     return result
 
 
+def _load_agent_notes(workspace: str) -> str:
+    """Read notes.md written by the agent in prior attempts, if it exists."""
+    notes_path = Path(workspace) / "_agent_scripts" / "notes.md"
+    try:
+        if notes_path.exists():
+            return notes_path.read_text(encoding="utf-8", errors="ignore").strip()
+    except OSError:
+        pass
+    return ""
+
+
+def _extract_agent_read_files(
+    messages: list[dict],
+    workspace: str,
+    existing_paths: set[str],
+) -> list[dict]:
+    """Parse subsession messages for read_file calls; return files not already in context."""
+    seen: set[str] = set()
+    new_files: list[dict] = []
+    for msg in messages:
+        if msg.get("role") != "assistant":
+            continue
+        for tc in msg.get("tool_calls") or []:
+            if tc.get("function", {}).get("name") != "read_file":
+                continue
+            try:
+                args = json.loads(tc["function"]["arguments"])
+            except (json.JSONDecodeError, KeyError):
+                continue
+            path = args.get("path", "")
+            if not path or path in seen or path in existing_paths:
+                continue
+            seen.add(path)
+            abs_path = Path(workspace) / path
+            try:
+                lines = abs_path.read_text(encoding="utf-8", errors="ignore").splitlines()
+                if not lines:
+                    continue
+                content = "\n".join(lines[:200])
+                if len(lines) > 200:
+                    content += f"\n... ({len(lines) - 200} more lines)"
+                new_files.append({
+                    "path": path,
+                    "content": content,
+                    "why": "read by agent in prior attempt",
+                })
+            except OSError:
+                pass
+    return new_files
+
+
 class ImplementNode(Node):
     name = "IMPLEMENT"
     node_type = "llm_subsession"
@@ -188,6 +240,10 @@ class ImplementNode(Node):
         if scripts_note:
             system = system + "\n\n---\n\n" + scripts_note.strip()
 
+        prior_notes = _load_agent_notes(ws)
+        if prior_notes:
+            system = system + "\n\n---\n\nNotes from your prior attempt(s):\n" + prior_notes
+
         registry = ToolRegistry()
         build_dev_toolset(registry)
 
@@ -210,10 +266,27 @@ class ImplementNode(Node):
             "cost_usd": result.total_cost_usd,
         })
 
+        # Carry forward files the agent read this attempt into the context bundle
+        existing_paths = {f["path"] for f in state.context_bundle.task_adjacent_files}
+        new_files = _extract_agent_read_files(result.messages, ws, existing_paths)
+        if new_files:
+            self.tracer.emit("implement.context_carried_forward", {
+                "files": [f["path"] for f in new_files],
+            })
+        updated_bundle = ContextBundle(
+            repo_rules=state.context_bundle.repo_rules,
+            build_and_test_commands=state.context_bundle.build_and_test_commands,
+            repo_map=state.context_bundle.repo_map,
+            task_adjacent_files=state.context_bundle.task_adjacent_files + new_files,
+        )
+
         next_node = "VERIFY" if state.task_type == "bug_fix" else "VERIFY_ADDITIVE"
 
         return NodeResult(
             next_node=next_node,
-            state_update={"budgets": updated_state.budgets},
+            state_update={
+                "budgets": updated_state.budgets,
+                "context_bundle": updated_bundle,
+            },
             status="ok" if result.status == "done" else "warning",
         )
