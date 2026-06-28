@@ -100,3 +100,11 @@ GROUNDBREAKING STRATEGIES:
 2. Import-graph hopping from test files as a fallback for context gathering. When a test fails with a simple assertion error (`assert not hasattr(b1, '__dict__')`), the traceback only mentions the test file — there's no stack trace into source code. The original context gatherer only walked one import-graph hop from SOURCE files (and found nothing). Fixing this to also hop from test files when no source files appear in the traceback gave the agent `basic.py` preloaded as context, pointing it directly toward the Printable class and the missing `__slots__`.
 
 3. Resolve test IDs as a combined batch (f2p + p2p together) before they enter any system component. Resolving f2p (1 ID) and p2p (21 IDs) separately means the majority vote for f2p is weak (only 1 data point). By concatenating all 22 IDs and resolving them in one call, the majority vote has 22× stronger signal — the correct test file wins unambiguously even when common names like `test_equality` or `test_subs` appear in many other test files. This prevented false p2p regressions that were causing the agent to oscillate between fixing and reverting.
+
+
+The harness currently assumes pytest for everything. Even after resolving a Django test ID to tests/app/test_foo.py::TestClass::test_method, that only works if pytest-django is installed and DJANGO_SETTINGS_MODULE is set. The resolution is one layer — the runner assumption is another.
+
+For a truly generalizable harness you'd need:
+1. Test runner detection — check for pytest.ini, manage.py, go.mod, package.json test scripts, etc.
+2. ID normalization per runner — convert bare IDs to the native format for that runner
+3. Runner-aware execution — pytest, python -m django test, go test -run, npm test -- --testNamePattern= etc.
