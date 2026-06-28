@@ -25,107 +25,110 @@ def _is_full_test_id(test_id: str) -> bool:
     return "::" in test_id or ("/" in test_id and test_id.endswith(".py"))
 
 
-def resolve_test_id(workspace: str, test_id: str, preferred_file: str = "") -> str:
-    """Convert a bare/Django-style test ID to a full pytest node ID.
+def _resolve_django_style(test_id: str, workspace: str) -> str:
+    """Resolve a Django-format test ID: 'test_foo (module.path.ClassName)'."""
+    m = re.match(r"^(\w+)\s+\(([^)]+)\)$", test_id.strip())
+    if not m:
+        return test_id
+    func_name = m.group(1)
+    dotted = m.group(2)
+    parts = dotted.rsplit(".", 1)
+    if len(parts) == 2:
+        module_dotted, class_name = parts
+        file_rel = module_dotted.replace(".", "/") + ".py"
+        for prefix in ("", "tests/", "test/"):
+            candidate = os.path.join(workspace, prefix + file_rel)
+            if os.path.isfile(candidate):
+                rel = os.path.relpath(candidate, workspace)
+                return f"{rel}::{class_name}::{func_name}"
+    return f"-k {func_name}"
 
-    SWE-bench supplies test IDs in multiple formats:
-      - Full:   sympy/core/tests/test_basic.py::test_foo   (use as-is)
-      - Bare:   test_foo                                    (search test files)
-      - Django: test_foo (module.path.ClassName)            (parse + map to file)
 
-    preferred_file: if provided, check this file first before searching globally.
-    """
+def resolve_test_id(workspace: str, test_id: str) -> str:
+    """Convert a single test ID to a runnable pytest node ID (best-effort, no batch context)."""
     if _is_full_test_id(test_id):
         return test_id
-
-    # Django format: "test_name (dotted.module.ClassName)"
-    m = re.match(r"^(\w+)\s+\(([^)]+)\)$", test_id.strip())
-    if m:
-        func_name = m.group(1)
-        dotted = m.group(2)  # e.g. "model_fields.test_filepathfield.FilePathFieldTests"
-        parts = dotted.rsplit(".", 1)
-        if len(parts) == 2:
-            module_dotted, class_name = parts
-            file_rel = module_dotted.replace(".", "/") + ".py"
-            for prefix in ("", "tests/", "test/"):
-                candidate = os.path.join(workspace, prefix + file_rel)
-                if os.path.isfile(candidate):
-                    rel = os.path.relpath(candidate, workspace)
-                    return f"{rel}::{class_name}::{func_name}"
-        return f"-k {func_name}"
-
-    # Bare function name: check preferred_file first, then search globally
-    if "/" not in test_id and not test_id.endswith(".py"):
-        if preferred_file:
-            abs_pref = os.path.join(workspace, preferred_file)
-            try:
-                content = open(abs_pref, errors="ignore").read()
-                if re.search(rf"^\s*def {re.escape(test_id)}\s*\(", content, re.MULTILINE):
-                    return f"{preferred_file}::{test_id}"
-            except OSError:
-                pass
-
-        try:
-            r = subprocess.run(
-                ["grep", "-r", f"def {test_id}", "--include=*.py", "-l", "."],
-                capture_output=True, text=True, cwd=workspace, timeout=30,
-            )
-            candidates = [
-                line.strip() for line in r.stdout.splitlines()
-                if "test" in line.lower() and line.strip().endswith(".py")
-            ]
-            if candidates:
-                return f"{candidates[0]}::{test_id}"
-        except Exception:
-            pass
-
+    if re.match(r"^(\w+)\s+\(", test_id.strip()):
+        return _resolve_django_style(test_id, workspace)
+    # Bare name: global grep, take first hit
+    try:
+        r = subprocess.run(
+            ["grep", "-r", f"def {test_id}", "--include=*.py", "-l", "."],
+            capture_output=True, text=True, cwd=workspace, timeout=30,
+        )
+        hits = [l.strip() for l in r.stdout.splitlines()
+                if "test" in l.lower() and l.strip().endswith(".py")]
+        if hits:
+            return f"{hits[0]}::{test_id}"
+    except Exception:
+        pass
     return test_id
 
 
 def resolve_test_ids(workspace: str, test_ids: list[str]) -> list[str]:
-    """Resolve a batch of test IDs, using majority-vote file detection to handle ambiguity.
+    """Resolve a batch of test IDs to runnable pytest node IDs.
 
-    When bare function names could match multiple test files, we find the single
-    file that contains the most of the given test functions, then use that file
-    for all bare-name IDs. This avoids picking the wrong file when common names
-    like 'test_equality' appear in many test files.
+    For each bare function name that matches multiple test files, we break the
+    tie using cross-reference: prefer the file that also defines the most OTHER
+    test IDs in this batch.  This handles cases where tests come from more than
+    one file — each test is resolved independently using the batch as context,
+    rather than forcing a single global "best file" onto everything.
     """
     if not test_ids:
         return test_ids
 
-    # Separate already-resolved from bare IDs
-    bare_ids = [tid for tid in test_ids if not _is_full_test_id(tid) and
-                not re.match(r"^(\w+)\s+\(", tid.strip())]  # exclude Django-style too
+    # Split into already-resolved and bare IDs (Django-style handled separately)
+    bare_unique: list[str] = []
+    seen: set[str] = set()
+    for tid in test_ids:
+        if not _is_full_test_id(tid) and not re.match(r"^(\w+)\s+\(", tid.strip()):
+            if tid not in seen:
+                bare_unique.append(tid)
+                seen.add(tid)
 
-    preferred_file = ""
-    if bare_ids:
-        preferred_file = _find_best_file_for_bare_ids(workspace, bare_ids)
-
-    return [resolve_test_id(workspace, tid, preferred_file=preferred_file) for tid in test_ids]
-
-
-def _find_best_file_for_bare_ids(workspace: str, bare_ids: list[str]) -> str:
-    """Find the single test file that contains the most of the given bare test IDs.
-
-    Runs ONE grep per function name and tallies which file appears most often.
-    """
-    from collections import Counter
-    file_counts: Counter = Counter()
-
-    for tid in bare_ids:
+    # Collect candidate files for every unique bare ID in one grep pass each
+    candidates: dict[str, list[str]] = {}  # test_id → [file, ...]
+    for tid in bare_unique:
         try:
             r = subprocess.run(
                 ["grep", "-r", f"def {tid}", "--include=*.py", "-l", "."],
                 capture_output=True, text=True, cwd=workspace, timeout=15,
             )
-            for line in r.stdout.splitlines():
-                line = line.strip()
-                if "test" in line.lower() and line.endswith(".py"):
-                    file_counts[line] += 1
+            hits = [l.strip() for l in r.stdout.splitlines()
+                    if "test" in l.lower() and l.strip().endswith(".py")]
+            candidates[tid] = hits
         except Exception:
-            pass
+            candidates[tid] = []
 
-    return file_counts.most_common(1)[0][0] if file_counts else ""
+    # Score every file by how many distinct test IDs it covers across the batch
+    from collections import Counter
+    file_coverage: Counter = Counter()
+    for tid, files in candidates.items():
+        for f in files:
+            file_coverage[f] += 1
+
+    # Resolve: for each bare ID, pick the candidate file with highest batch coverage
+    resolved_map: dict[str, str] = {}
+    for tid in bare_unique:
+        files = candidates.get(tid, [])
+        if not files:
+            resolved_map[tid] = tid  # fallback: leave unchanged
+        elif len(files) == 1:
+            resolved_map[tid] = f"{files[0]}::{tid}"
+        else:
+            best = max(files, key=lambda f: file_coverage[f])
+            resolved_map[tid] = f"{best}::{tid}"
+
+    # Apply resolutions, delegating Django-style and already-resolved IDs inline
+    result: list[str] = []
+    for tid in test_ids:
+        if _is_full_test_id(tid):
+            result.append(tid)
+        elif re.match(r"^(\w+)\s+\(", tid.strip()):
+            result.append(_resolve_django_style(tid, workspace))
+        else:
+            result.append(resolved_map.get(tid, tid))
+    return result
 
 
 # ── Bug fix: traceback-driven context ────────────────────────────────────────

@@ -162,9 +162,8 @@ def run_agent(instance: dict, work_dir: str, max_turns: int, max_cost: float):
 
     # Resolve bare / Django-style test IDs to full pytest node IDs now,
     # so every downstream consumer (prompts, VERIFY, GATHER_CONTEXT) sees
-    # runnable test identifiers.
-    # Pass ALL test IDs together so majority-vote file detection has the
-    # strongest possible signal (22 IDs beat 1).
+    # runnable test identifiers.  Pass f2p + p2p together so the per-test
+    # cross-reference disambiguation has the largest possible batch to score against.
     all_resolved = resolve_test_ids(work_dir, fail_to_pass + pass_to_pass)
     fail_to_pass = all_resolved[:len(fail_to_pass)]
     pass_to_pass = all_resolved[len(fail_to_pass):]
