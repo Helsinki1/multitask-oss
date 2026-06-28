@@ -71,21 +71,23 @@ never a directory, module, or the full suite. Unrelated failures will mislead yo
 _BUGFIX_RETRY_F2P = """\
 RETRY (attempt {attempt} of 5) — fail_to_pass tests are still failing.
 
-The following tests did not pass after your last implementation:
-{f2p_failing_list}
+fail_to_pass status after last attempt:
+{f2p_status_list}
 
-Your changes so far (git diff HEAD):
+{p2p_warning}Your changes so far (git diff HEAD):
 {diff}
 
-Do NOT re-read the same files you already read. The traceback above shows the root cause.
-Fix it — the harness will verify.\
+Fix the still-failing tests. Use their exact test IDs to spot-check — not a keyword or file path.\
 """
 
 _BUGFIX_RETRY_P2P = """\
 RETRY (attempt {attempt} of 5) — your fix caused pass_to_pass regressions.
 
-Regressions (tests that were passing before your change, now failing):
+pass_to_pass regressions (were passing before your change, now failing):
 {p2p_failing_list}
+
+fail_to_pass status:
+{f2p_status_list}
 
 Your changes so far (git diff HEAD):
 {diff}
@@ -166,18 +168,18 @@ def build_bugfix_system(state: AgentState) -> str:
         layers.append(_BUGFIX_OBJECTIVE.format(f2p_list=f2p_list))
     elif state.verify_failure_type == "f2p_failing":
         diff = _get_diff(state.workspace_path)
-        f2p_list = _format_test_list(f2p_failing)
         layers.append(_BUGFIX_RETRY_F2P.format(
             attempt=state.verify_attempts,
-            f2p_failing_list=f2p_list,
+            f2p_status_list=_format_f2p_status(state.todo_list.cases),
+            p2p_warning=_format_p2p_warning(p2p_failing),
             diff=diff[:3000],
         ))
     else:  # p2p_regression
         diff = _get_diff(state.workspace_path)
-        p2p_list = _format_test_list(p2p_failing)
         layers.append(_BUGFIX_RETRY_P2P.format(
             attempt=state.verify_attempts,
-            p2p_failing_list=p2p_list,
+            p2p_failing_list=_format_test_list(p2p_failing),
+            f2p_status_list=_format_f2p_status(state.todo_list.cases),
             diff=diff[:3000],
         ))
 
@@ -269,6 +271,39 @@ def build_define_contract_human(state: AgentState) -> str:
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
+
+def _format_f2p_status(cases: list) -> str:
+    """All f2p TestCases: passing shown briefly, failing shown with traceback."""
+    f2p = [c for c in cases if c.category == "fail_to_pass"]
+    if not f2p:
+        return "  (none)"
+    parts: list[str] = []
+    for c in f2p:
+        if c.status == "passing":
+            parts.append(f"  [PASS] {c.test_id}")
+        else:
+            parts.append(f"  [FAIL] {c.test_id}")
+            if c.traceback:
+                tb_lines = c.traceback.strip().splitlines()
+                snippet = "\n".join(tb_lines[-30:])
+                parts.append(f"  Traceback (last 30 lines):\n{_indent(snippet, '    ')}")
+    return "\n".join(parts)
+
+
+def _format_p2p_warning(p2p_failing: list) -> str:
+    """Non-empty warning block if p2p tests regressed; empty string otherwise."""
+    if not p2p_failing:
+        return ""
+    lines = ["WARNING — your changes also broke pass_to_pass tests (regressions):"]
+    for c in p2p_failing:
+        lines.append(f"  [FAIL] {c.test_id}")
+        if c.traceback:
+            tb_lines = c.traceback.strip().splitlines()
+            snippet = "\n".join(tb_lines[-15:])
+            lines.append(f"  Traceback (last 15 lines):\n{_indent(snippet, '    ')}")
+    lines.append("Keep these in mind — do not make them worse while fixing f2p.")
+    return "\n".join(lines) + "\n\n"
+
 
 def _format_test_list(cases: list) -> str:
     if not cases:
