@@ -51,21 +51,23 @@ Safety:
 # ── Bug fix prompt ────────────────────────────────────────────────────────────
 
 _BUGFIX_OBJECTIVE = """\
-Your objective: make ALL of the following tests pass without breaking anything else.
+Your objective: make ALL fail_to_pass tests pass without breaking any pass_to_pass tests.
 
-Failing tests (your to-do list):
+Fail-to-pass tests (must go from failing → passing):
 {f2p_list}
+
+Pass-to-pass tests (were passing before — must stay passing):
+{p2p_id_list}
 
 Pre-loaded context files were extracted from the test tracebacks — start here.
 Trace the traceback to its root cause, then make the minimal correct change.
 
-When you are satisfied with your changes, produce a final text summary of:
-  1. Which files you changed and why
-  2. The root cause you fixed
-Then stop. The harness verifies your fix.
+To spot-check: run the EXACT test IDs listed above — never a directory, module, keyword
+search, or the full suite. For example: `pytest sympy/core/tests/test_basic.py::test_slots`
+Unrelated failures will mislead you.
 
-If you want to spot-check before stopping, run ONLY the specific test IDs listed above —
-never a directory, module, or the full suite. Unrelated failures will mislead you.\
+When satisfied, summarize which files you changed, why, and the root cause you fixed.
+Then stop — the harness verifies your fix.\
 """
 
 _BUGFIX_RETRY_F2P = """\
@@ -165,7 +167,10 @@ def build_bugfix_system(state: AgentState) -> str:
     if state.verify_attempts == 0:
         # First attempt — show objective with all f2p tests and their tracebacks
         f2p_list = _format_test_list(f2p_failing if f2p_failing else state.todo_list.cases)
-        layers.append(_BUGFIX_OBJECTIVE.format(f2p_list=f2p_list))
+        layers.append(_BUGFIX_OBJECTIVE.format(
+            f2p_list=f2p_list,
+            p2p_id_list=_format_p2p_id_list(state.pass_to_pass),
+        ))
     elif state.verify_failure_type == "f2p_failing":
         diff = _get_diff(state.workspace_path)
         layers.append(_BUGFIX_RETRY_F2P.format(
@@ -288,6 +293,12 @@ def _format_f2p_status(cases: list) -> str:
                 snippet = "\n".join(tb_lines[-30:])
                 parts.append(f"  Traceback (last 30 lines):\n{_indent(snippet, '    ')}")
     return "\n".join(parts)
+
+
+def _format_p2p_id_list(test_ids: list[str]) -> str:
+    if not test_ids:
+        return "  (none)"
+    return "\n".join(f"  {tid}" for tid in test_ids)
 
 
 def _format_p2p_warning(p2p_failing: list) -> str:
