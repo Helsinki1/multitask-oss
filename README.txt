@@ -7,8 +7,9 @@ Done
 * environmental noise suppression: PAGER=cat, MANPAGER=cat, TQDM_DISABLE=1, PIP_PROGRESS_BAR=off -- eliminates the garbage (progress bars, pagers, ANSI codes) that eats context tokens and confuses models
 * force agent to make one bash exec per turn
 * model-agnostic routing: cheap models for file discovery, strong models for patch generation
-* added a simple classifier for "bug fix" vs "additive" tasks --- if additive task fails, it goes into bug fix mode but without the reproduce-issue steps
-* SWE-bench eval harness (swe_bench_run.py): eval_mode flag skips mirror-building, uses planted FAIL_TO_PASS/PASS_TO_PASS test IDs for deterministic repro confirmation and verify
+* added a simple classifier for "bug fix" vs "additive" tasks --- leading to different agent node traversals
+* after every IMPLEMENT subsession, the agent gathers all the context it gathered and puts it in ContextBundle dict to pass to the next IMPLEMENT session, reducing re-reads (compress still applies after 20th turns)
+* after every IMPLEMENT subsession, the agent writes notes to itself that it injects into its instruction prompts in the next session
 
 Improvements
 1. better testing environment: running tests / subagent sessions are all via "git worktree add -b" instead of a separate docker container that requires cold start
@@ -41,6 +42,7 @@ references
 - openautocoder/agentless
 - walkie-talkie (https://github.com/xyuzh/walkie-talkie)
 - claude code behavior: read/bash/edit (we could stick with this but direct it to Reproduce)
+- disecting swe bench leaderboard: https://arxiv.org/pdf/2506.17208v1
 
 clear product vision
 - harness for devin/minion-like coding agent, with autonomy to commit/push, experiment, and test environment

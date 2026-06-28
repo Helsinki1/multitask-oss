@@ -1,6 +1,7 @@
 Example Trace Walkthrough
 =========================
 Command: python3 -m cloud_agent.cli --repo ./demo_repo --reset-repo --task "..."
+modal run modal_run.py::run_one --instance-id sympy__sympy-20590
 
 davidx@davidx-XPS-15:~/Downloads/multitask-oss$ python3 -m cloud_agent.cli --repo ./demo_repo --reset-repo --task "in a file main.py, solve this algorithms question: implement a skip list data structure that can achieve O(log n) range queries"
 Resetting repo at /home/davidx/Downloads/multitask-oss/demo_repo...
