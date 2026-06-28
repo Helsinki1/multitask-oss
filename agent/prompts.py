@@ -18,7 +18,7 @@ Core rules:
 - Do not push, deploy, merge, or publish anything.
 - Do not modify test files.
 - Do not make changes unrelated to the task.
-- After each tool result, write ONE sentence: what you now know and what you will do next.\
+- After each tool result, think step by step: what does this tell you about the root cause, how does it update your current hypothesis, and what will your next action test or accomplish.\
 """
 
 _ENV = """\
