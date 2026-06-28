@@ -12,6 +12,7 @@ Routing (separate edges for separate failure types):
 
 from __future__ import annotations
 
+from agent.context import resolve_test_id
 from agent.runtime import Node, NodeResult
 from agent.state import AgentState, TestCase, TestToDoList
 from observability.tracer import Tracer
@@ -94,9 +95,10 @@ def _run_all_tests(workspace: str, todo_list: TestToDoList, tracer: Tracer) -> l
     updated: list[TestCase] = []
 
     for case in todo_list.cases:
+        test_id = resolve_test_id(workspace, case.test_id)
         if case.category == "fail_to_pass":
             rc, out = run_cmd(
-                f"python -m pytest {case.test_id} -x --tb=long --no-header -q",
+                f"python -m pytest {test_id} -x --tb=long --no-header -q",
                 workspace,
                 timeout=_TEST_TIMEOUT,
             )
@@ -115,7 +117,7 @@ def _run_all_tests(workspace: str, todo_list: TestToDoList, tracer: Tracer) -> l
         else:
             # pass_to_pass: run with --tb=short, no -x (run all, catch all regressions)
             rc, out = run_cmd(
-                f"python -m pytest {case.test_id} --tb=short --no-header -q",
+                f"python -m pytest {test_id} --tb=short --no-header -q",
                 workspace,
                 timeout=_TEST_TIMEOUT,
             )

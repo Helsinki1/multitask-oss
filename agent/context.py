@@ -17,6 +17,117 @@ _SKIP_DIRS = {".git", "__pycache__", "node_modules", ".venv", "venv", ".tox", "d
 _RULE_FILES = ["AGENTS.md", "CLAUDE.md", ".cursor/rules", ".github/copilot-instructions.md"]
 
 
+# ── Test ID resolution ────────────────────────────────────────────────────────
+
+
+def _is_full_test_id(test_id: str) -> bool:
+    """Return True if test_id is already a runnable pytest node ID (no resolution needed)."""
+    return "::" in test_id or ("/" in test_id and test_id.endswith(".py"))
+
+
+def resolve_test_id(workspace: str, test_id: str, preferred_file: str = "") -> str:
+    """Convert a bare/Django-style test ID to a full pytest node ID.
+
+    SWE-bench supplies test IDs in multiple formats:
+      - Full:   sympy/core/tests/test_basic.py::test_foo   (use as-is)
+      - Bare:   test_foo                                    (search test files)
+      - Django: test_foo (module.path.ClassName)            (parse + map to file)
+
+    preferred_file: if provided, check this file first before searching globally.
+    """
+    if _is_full_test_id(test_id):
+        return test_id
+
+    # Django format: "test_name (dotted.module.ClassName)"
+    m = re.match(r"^(\w+)\s+\(([^)]+)\)$", test_id.strip())
+    if m:
+        func_name = m.group(1)
+        dotted = m.group(2)  # e.g. "model_fields.test_filepathfield.FilePathFieldTests"
+        parts = dotted.rsplit(".", 1)
+        if len(parts) == 2:
+            module_dotted, class_name = parts
+            file_rel = module_dotted.replace(".", "/") + ".py"
+            for prefix in ("", "tests/", "test/"):
+                candidate = os.path.join(workspace, prefix + file_rel)
+                if os.path.isfile(candidate):
+                    rel = os.path.relpath(candidate, workspace)
+                    return f"{rel}::{class_name}::{func_name}"
+        return f"-k {func_name}"
+
+    # Bare function name: check preferred_file first, then search globally
+    if "/" not in test_id and not test_id.endswith(".py"):
+        if preferred_file:
+            abs_pref = os.path.join(workspace, preferred_file)
+            try:
+                content = open(abs_pref, errors="ignore").read()
+                if re.search(rf"^\s*def {re.escape(test_id)}\s*\(", content, re.MULTILINE):
+                    return f"{preferred_file}::{test_id}"
+            except OSError:
+                pass
+
+        try:
+            r = subprocess.run(
+                ["grep", "-r", f"def {test_id}", "--include=*.py", "-l", "."],
+                capture_output=True, text=True, cwd=workspace, timeout=30,
+            )
+            candidates = [
+                line.strip() for line in r.stdout.splitlines()
+                if "test" in line.lower() and line.strip().endswith(".py")
+            ]
+            if candidates:
+                return f"{candidates[0]}::{test_id}"
+        except Exception:
+            pass
+
+    return test_id
+
+
+def resolve_test_ids(workspace: str, test_ids: list[str]) -> list[str]:
+    """Resolve a batch of test IDs, using majority-vote file detection to handle ambiguity.
+
+    When bare function names could match multiple test files, we find the single
+    file that contains the most of the given test functions, then use that file
+    for all bare-name IDs. This avoids picking the wrong file when common names
+    like 'test_equality' appear in many test files.
+    """
+    if not test_ids:
+        return test_ids
+
+    # Separate already-resolved from bare IDs
+    bare_ids = [tid for tid in test_ids if not _is_full_test_id(tid) and
+                not re.match(r"^(\w+)\s+\(", tid.strip())]  # exclude Django-style too
+
+    preferred_file = ""
+    if bare_ids:
+        preferred_file = _find_best_file_for_bare_ids(workspace, bare_ids)
+
+    return [resolve_test_id(workspace, tid, preferred_file=preferred_file) for tid in test_ids]
+
+
+def _find_best_file_for_bare_ids(workspace: str, bare_ids: list[str]) -> str:
+    """Find the single test file that contains the most of the given bare test IDs.
+
+    Runs ONE grep per function name and tallies which file appears most often.
+    """
+    from collections import Counter
+    file_counts: Counter = Counter()
+
+    for tid in bare_ids:
+        try:
+            r = subprocess.run(
+                ["grep", "-r", f"def {tid}", "--include=*.py", "-l", "."],
+                capture_output=True, text=True, cwd=workspace, timeout=15,
+            )
+            for line in r.stdout.splitlines():
+                line = line.strip()
+                if "test" in line.lower() and line.endswith(".py"):
+                    file_counts[line] += 1
+        except Exception:
+            pass
+
+    return file_counts.most_common(1)[0][0] if file_counts else ""
+
+
 # ── Bug fix: traceback-driven context ────────────────────────────────────────
 
 
@@ -30,6 +141,11 @@ def build_bugfix_context(
     Returns the initial TestToDoList (all tests run once) and a ContextBundle
     whose task_adjacent_files come from traceback frames + one import-graph hop.
     """
+    # Resolve bare/Django test IDs using ALL test IDs for stronger majority voting
+    all_resolved = resolve_test_ids(workspace, fail_to_pass + pass_to_pass)
+    fail_to_pass = all_resolved[:len(fail_to_pass)]
+    pass_to_pass = all_resolved[len(fail_to_pass):]
+
     cb = ContextBundle()
     cb.repo_rules = _load_repo_rules(workspace)
     cb.build_and_test_commands = _detect_build_commands(workspace)
@@ -230,12 +346,15 @@ def _dedupe_frames(frames: list[tuple[str, int]], workspace: str) -> list[str]:
         else:
             source_files.append(path)
 
-    # One import-graph hop from source files to catch transitive dependencies
-    imported = _build_import_subgraph(workspace, source_files[:6], hops=1)
-    all_files = source_files + [f for f in imported if f not in seen]
+    # One import-graph hop from source files; if no source files in traceback
+    # (e.g. simple assertion failures), hop from test files to find source context.
+    hop_seeds = source_files[:6] if source_files else test_files[:3]
+    imported = _build_import_subgraph(workspace, hop_seeds, hops=1)
+    imported_source = [f for f in imported if not any("test" in p.lower() for p in f.replace("\\", "/").split("/"))]
+    all_files = source_files + [f for f in imported_source if f not in seen]
     all_files += test_files
 
-    return all_files[:10]
+    return all_files[:12]
 
 
 # ── Internal: import graph ────────────────────────────────────────────────────

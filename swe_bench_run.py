@@ -150,6 +150,7 @@ def _install_env(work_dir: str) -> None:
 
 def run_agent(instance: dict, work_dir: str, max_turns: int, max_cost: float):
     """Build eval_mode AgentState and run the devloop engine."""
+    from agent.context import resolve_test_ids
     from agent.state import AgentState, BudgetState
     from blueprints.devloop import build_devloop
     from cloud_agent.config import settings
@@ -158,6 +159,15 @@ def run_agent(instance: dict, work_dir: str, max_turns: int, max_cost: float):
 
     fail_to_pass = _parse_test_ids(instance["FAIL_TO_PASS"])
     pass_to_pass = _parse_test_ids(instance["PASS_TO_PASS"])
+
+    # Resolve bare / Django-style test IDs to full pytest node IDs now,
+    # so every downstream consumer (prompts, VERIFY, GATHER_CONTEXT) sees
+    # runnable test identifiers.
+    # Pass ALL test IDs together so majority-vote file detection has the
+    # strongest possible signal (22 IDs beat 1).
+    all_resolved = resolve_test_ids(work_dir, fail_to_pass + pass_to_pass)
+    fail_to_pass = all_resolved[:len(fail_to_pass)]
+    pass_to_pass = all_resolved[len(fail_to_pass):]
 
     task = (
         f"{instance['problem_statement'].strip()}\n\n"
@@ -183,8 +193,13 @@ def run_agent(instance: dict, work_dir: str, max_turns: int, max_cost: float):
 
 def evaluate(instance: dict, work_dir: str) -> tuple[bool, dict[str, bool]]:
     """Independent post-run check: FAIL_TO_PASS must pass, PASS_TO_PASS must not regress."""
-    fail_to_pass = _parse_test_ids(instance["FAIL_TO_PASS"])
-    pass_to_pass = _parse_test_ids(instance["PASS_TO_PASS"])
+    from agent.context import resolve_test_ids
+
+    raw_f2p = _parse_test_ids(instance["FAIL_TO_PASS"])
+    raw_p2p = _parse_test_ids(instance["PASS_TO_PASS"])
+    all_resolved = resolve_test_ids(work_dir, raw_f2p + raw_p2p)
+    fail_to_pass = all_resolved[:len(raw_f2p)]
+    pass_to_pass = all_resolved[len(raw_f2p):]
 
     def _pytest(test_ids: list[str], stop_on_first: bool = True) -> bool:
         flags = ["-x", "--tb=short", "-q"] if stop_on_first else ["--tb=short", "-q"]

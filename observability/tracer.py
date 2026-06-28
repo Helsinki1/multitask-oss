@@ -61,6 +61,10 @@ class Tracer:
             print(f"  is_done={done} ({reason})", file=sys.stderr)
         elif event_type == "subsession.done":
             print(f"  subsession complete: {data.get('status', '')}", file=sys.stderr)
+        elif event_type == "verify.result":
+            f2p_fail = data.get("f2p_failing", [])
+            p2p_fail = data.get("p2p_failing", [])
+            print(f"  verify: f2p_failing={f2p_fail}  p2p_failing={p2p_fail}", file=sys.stderr)
         elif event_type == "history.compressed":
             print(
                 f"  [compression] turn {data.get('turn')}: stale tool results truncated"

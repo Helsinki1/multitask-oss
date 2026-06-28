@@ -74,3 +74,29 @@ wrong: letting llm write desired behavior w/o strict verifiable contracts (test-
 
 - each retry can get very repetitive (same file rereads, same patches/tests ran, same reasoning results...)
 - 3 retry + verify attempts ARENT enough, swe-bench cases that regress need a lot more reasoning steps
+
+
+-----------------------------------------------------------------------------------------------------------------------
+
+HILLCLIMB SESSION — sympy__sympy-20590
+
+DIAGNOSED ISSUES:
+
+1. SWE-bench Lite test IDs are often bare function names (e.g. "test_immutable") or Django-format strings — VERIFY was running `pytest test_immutable` which returns a collection error (no tests found), so VERIFY always reported failures regardless of whether the agent's fix was correct.
+
+2. Without majority-vote file resolution, bare test names like `test_equality` or `test_subs` can grep-match multiple test files across a large repo — the wrong file gets selected, causing false p2p regressions that don't reflect actual code breakage.
+
+3. When a test failure is a simple assertion error (e.g. `assert not hasattr(b1, '__dict__')`), the traceback only points to the test file — context gathering's import-graph hop only started from source files, so it found nothing useful and gave the agent no preloaded source context.
+
+4. The `verify.result` tracer event was never printed to stderr, making it invisible which specific tests were failing — diagnosing p2p regressions required guessing from the agent's behavior rather than reading the actual failing test IDs.
+
+5. The agent's `mro_check.py` usage was confused across attempts because the tool docstring described two incompatible calling conventions — wasting 2–3 turns per attempt on failed tool invocations before the agent figured out the right syntax.
+
+
+GROUNDBREAKING STRATEGIES:
+
+1. Test ID resolution with majority-vote file detection. SWE-bench ships test IDs as bare function names (sympy) or Django-format strings (django). Running `pytest test_immutable` errors with "no tests collected." The fix: grep all test IDs across the repo and use majority-vote to find the file that contains the most of them. All 22 test IDs (1 f2p + 21 p2p) pointed overwhelmingly to `test_basic.py`. With the correct full path `sympy/core/tests/test_basic.py::test_immutable`, VERIFY actually ran the test, the agent got real tracebacks, and the problem went from 5 failed attempts to 1 successful attempt in 9 turns at $0.05.
+
+2. Import-graph hopping from test files as a fallback for context gathering. When a test fails with a simple assertion error (`assert not hasattr(b1, '__dict__')`), the traceback only mentions the test file — there's no stack trace into source code. The original context gatherer only walked one import-graph hop from SOURCE files (and found nothing). Fixing this to also hop from test files when no source files appear in the traceback gave the agent `basic.py` preloaded as context, pointing it directly toward the Printable class and the missing `__slots__`.
+
+3. Resolve test IDs as a combined batch (f2p + p2p together) before they enter any system component. Resolving f2p (1 ID) and p2p (21 IDs) separately means the majority vote for f2p is weak (only 1 data point). By concatenating all 22 IDs and resolving them in one call, the majority vote has 22× stronger signal — the correct test file wins unambiguously even when common names like `test_equality` or `test_subs` appear in many other test files. This prevented false p2p regressions that were causing the agent to oscillate between fixing and reverting.
