@@ -372,20 +372,111 @@ def _module_to_file(workspace: str, module: str) -> str | None:
 # ── Internal: file loading ────────────────────────────────────────────────────
 
 
+def _find_local_callees(
+    path: str,
+    func_starts: list[int],
+    outline: list[dict],
+) -> set[str]:
+    """Return base names of outline-defined functions called within the given functions.
+
+    func_starts: 1-indexed start lines of call-site functions (traceback frames).
+    Only returns names that are defined locally in this file (present in outline)
+    and are not the frame functions themselves.
+    """
+    try:
+        source = open(path, encoding="utf-8", errors="ignore").read()
+        tree = ast.parse(source)
+    except (SyntaxError, OSError):
+        return set()
+
+    local_names = {e["name"].split(".")[-1] for e in outline}
+    func_start_set = set(func_starts)
+    frame_names: set[str] = set()
+    called: set[str] = set()
+
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        if node.lineno not in func_start_set:
+            continue
+        frame_names.add(node.name)
+        for child in ast.walk(node):
+            if isinstance(child, ast.Call):
+                if isinstance(child.func, ast.Name):
+                    called.add(child.func.id)
+                elif isinstance(child.func, ast.Attribute):
+                    called.add(child.func.attr)
+
+    return (called & local_names) - frame_names
+
+
+def _render_outline_map(
+    outline: list[dict],
+    frame_lines: set[int],
+    callee_names: set[str],
+    rel_path: str,
+) -> str:
+    """Render a navigation map: all symbols with line ranges, traceback frames and callees marked.
+
+    The agent uses this map to know exactly what exists in the file and what line
+    range to pass to read_file() for any symbol it wants to inspect.
+    """
+    if not outline:
+        return ""
+
+    lines = [
+        f"NAVIGATION MAP — {rel_path} ({len(outline)} symbols)",
+        f'  To read any symbol: read_file("{rel_path}", start_line=X, end_line=Y)',
+    ]
+
+    for entry in outline:
+        name = entry["name"]
+        lo = entry["lineno"]
+        hi = entry["end_lineno"]
+        base = name.split(".")[-1]
+        is_method = "." in name
+        indent = "    " if is_method else "  "
+
+        is_frame = any(lo <= fl <= hi for fl in frame_lines)
+        is_callee = base in callee_names and not is_frame
+
+        if not is_method and any(e["name"].startswith(name + ".") for e in outline):
+            label = f"class {name}"
+        else:
+            label = base if is_method else name
+
+        doc = entry.get("docstring", "")
+        doc_suffix = f" — {doc}" if doc else ""
+
+        if is_frame:
+            marker = "  ⬅ TRACEBACK FRAME (shown below)"
+        elif is_callee:
+            marker = "  ← callee of traceback frame — read_file to see implementation"
+        else:
+            marker = ""
+
+        lines.append(f"{indent}{label} [lines {lo}–{hi}]{doc_suffix}{marker}")
+
+    return "\n".join(lines)
+
+
 def _load_context_files(
     workspace: str,
     frames: list[tuple[str, int]],
     max_lines_per_file: int = 450,
     head_lines: int = 60,
 ) -> list[dict]:
-    """Load context files: header + full call-site function for every traceback frame.
+    """Load context files: navigation map + header + all call-site functions.
 
-    A file may appear at multiple depths in the traceback (different call sites).
-    All anchors for the same file are collected and read together so every call-site
-    function is included, not just the first-seen one.
-    Source files are ordered before test files; total capped at 12 files.
+    For each traceback file:
+      - NAVIGATION MAP lists every symbol with its exact line range, marking traceback
+        frames (shown below) and callees of those frames (need read_file).
+      - File content shows the first head_lines (imports/module setup) plus the full
+        AST-bounded function for every traceback anchor in that file.
+
+    A file may appear at multiple traceback depths; all its anchors are collected so
+    every call-site function is shown. Source files come before test files; capped at 12.
     """
-    # Group all anchor lines by file, preserving first-seen file order
     file_anchors: dict[str, list[int]] = {}
     for path, lineno in frames:
         if not os.path.isfile(path):
@@ -400,13 +491,27 @@ def _load_context_files(
 
     result: list[dict] = []
     for filepath in ordered:
-        content = _read_file_tiered(
-            filepath, file_anchors[filepath], max_lines_per_file, head_lines
-        )
-        if content:
+        anchors = file_anchors[filepath]
+        rel = os.path.relpath(filepath, workspace)
+
+        outline = extract_file_outline(filepath)
+        frame_lines = set(anchors)
+
+        # Map each anchor to the start line of its containing function (for AST lookup)
+        func_starts = [
+            _find_containing_function(filepath, a)[0]
+            for a in anchors if a > 0
+        ]
+        callee_names = _find_local_callees(filepath, func_starts, outline)
+
+        nav_map = _render_outline_map(outline, frame_lines, callee_names, rel)
+        file_content = _read_file_tiered(filepath, anchors, max_lines_per_file, head_lines)
+
+        full = "\n\n".join(part for part in [nav_map, file_content] if part)
+        if full:
             result.append({
-                "path": os.path.relpath(filepath, workspace),
-                "content": content,
+                "path": rel,
+                "content": full,
                 "why": "appears in error traceback",
             })
     return result

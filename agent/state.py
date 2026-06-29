@@ -80,9 +80,6 @@ class ContextBundle:
     repo_rules: list[str] = field(default_factory=list)
     build_and_test_commands: list[str] = field(default_factory=list)
     task_adjacent_files: list[dict] = field(default_factory=list)
-    # LLM-ranked additional sections per file; agent uses read_file to load them.
-    # Each entry: {"path": str, "sections": ["FuncName (lines X-Y): reason", ...]}
-    ranked_sections: list[dict] = field(default_factory=list)
 
 
 @dataclass

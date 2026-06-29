@@ -1,11 +1,12 @@
-"""Tests for the new traceback-driven and dep-graph context gathering."""
+"""Tests for the traceback-driven context gathering pipeline."""
 
 from __future__ import annotations
 
 from agent.context import (
+    _find_local_callees,
     _parse_traceback,
-    _build_import_subgraph,
-    _dedupe_frames,
+    _render_outline_map,
+    extract_file_outline,
 )
 from agent.state import TestCase, TestToDoList
 
@@ -41,22 +42,6 @@ def test_parse_traceback_ignores_outside_workspace(tmp_path):
     assert frames == []
 
 
-def test_dedupe_frames_source_before_test(tmp_path):
-    """Source files come before test files in deduped output."""
-    src = tmp_path / "mymodule.py"
-    test = tmp_path / "tests" / "test_mymodule.py"
-    test.parent.mkdir()
-    src.write_text("x = 1\n")
-    test.write_text("import mymodule\n")
-
-    frames = [(str(src), 1), (str(test), 5)]
-    result = _dedupe_frames(frames, str(tmp_path))
-
-    src_rel = result.index(str(src))
-    test_rel = result.index(str(test))
-    assert src_rel < test_rel
-
-
 def test_todo_list_properties():
     cases = [
         TestCase("tests/test_a.py::test_one", "fail_to_pass", "failing", "tb1"),
@@ -84,21 +69,59 @@ def test_todo_list_all_pass():
     assert todo.all_pass
 
 
-def test_build_import_subgraph(tmp_path):
-    """AST import walker resolves dotted module paths to workspace .py files."""
-    pkg = tmp_path / "mypkg"
-    pkg.mkdir()
-    init = pkg / "__init__.py"
-    init.write_text("")
-    utils = pkg / "utils.py"
-    utils.write_text("def helper(): pass\n")
+def test_extract_file_outline(tmp_path):
+    """outline returns entries for top-level functions and class methods."""
+    src = tmp_path / "mod.py"
+    src.write_text(
+        "class Foo:\n"
+        "    def bar(self): pass\n"
+        "    def baz(self): pass\n"
+        "def helper(): pass\n"
+    )
+    outline = extract_file_outline(str(src))
+    names = [e["name"] for e in outline]
+    assert "Foo" in names
+    assert "Foo.bar" in names
+    assert "Foo.baz" in names
+    assert "helper" in names
 
-    # 'from mypkg.utils import helper' → resolves module 'mypkg.utils' → mypkg/utils.py
-    main = tmp_path / "main.py"
-    main.write_text("from mypkg.utils import helper\n")
 
-    found = _build_import_subgraph(str(tmp_path), [str(main)], hops=1)
-    assert any("utils.py" in f for f in found)
+def test_find_local_callees(tmp_path):
+    """_find_local_callees returns names of locally-defined functions called by frame."""
+    src = tmp_path / "mod.py"
+    src.write_text(
+        "def helper(): pass\n"
+        "def external_call(): pass\n"
+        "def frame_func():\n"
+        "    helper()\n"
+        "    unrelated = 1\n"
+    )
+    outline = extract_file_outline(str(src))
+    frame_entry = next(e for e in outline if e["name"] == "frame_func")
+    callees = _find_local_callees(str(src), [frame_entry["lineno"]], outline)
+    assert "helper" in callees
+    assert "frame_func" not in callees  # not a callee of itself
+
+
+def test_render_outline_map_marks_frame_and_callee(tmp_path):
+    """Navigation map marks traceback frames and callees correctly."""
+    src = tmp_path / "mod.py"
+    src.write_text(
+        "def helper(): pass\n"
+        "def frame_func():\n"
+        "    helper()\n"
+    )
+    outline = extract_file_outline(str(src))
+    frame_entry = next(e for e in outline if e["name"] == "frame_func")
+    helper_entry = next(e for e in outline if e["name"] == "helper")
+
+    frame_lines = {frame_entry["lineno"]}
+    callee_names = {"helper"}
+
+    nav = _render_outline_map(outline, frame_lines, callee_names, "mod.py")
+    assert "TRACEBACK FRAME" in nav
+    assert "callee" in nav
+    assert "helper" in nav
 
 
 def test_default_implement_model():

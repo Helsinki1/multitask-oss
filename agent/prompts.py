@@ -47,10 +47,10 @@ Tools:
 - run_shell: run any bash command (grep, find, git, pytest, pip install, etc.)
 - read_file: read a file with line numbers
     Slicing: read_file(path, start_line=X, end_line=Y) — load only those lines.
-    Pre-loaded context shows the file head and the error site. Whenever you see
-    "... (N lines — use read_file to inspect) ..." in context, call read_file
-    with the appropriate start_line/end_line BEFORE drawing conclusions about what
-    is or isn't there. Ranked sections below list exact line ranges to investigate.
+    Each pre-loaded file begins with a NAVIGATION MAP listing every symbol and its
+    exact line range. Whenever you see "... (N lines — use read_file to inspect) ..."
+    or a symbol marked "← callee" in the map, call read_file with start_line/end_line
+    BEFORE drawing conclusions about what is or isn't there.
 - write_file: create a new file (not for overwriting)
 - replace_in_file: exact-text replacement in an existing file
 
@@ -281,22 +281,15 @@ def build_implement_human(state: AgentState) -> str:
                 break
         if sections:
             parts.append(
-                "Pre-loaded context files (head + error site per file — "
-                "call read_file with start_line/end_line for any truncated sections):\n"
+                "Pre-loaded context files — each begins with a NAVIGATION MAP listing "
+                "every function/class with its exact line range.\n"
+                "  ⬅ TRACEBACK FRAME = already shown in full below the map.\n"
+                "  ← callee = called by a traceback frame; use read_file to see it.\n"
+                "Use read_file(path, start_line=X, end_line=Y) for any symbol in the map "
+                "that is not already shown. Do not read from line 1 unless you need the header "
+                "— the map tells you exactly where each function starts.\n\n"
                 + "\n".join(sections)
             )
-
-    ranked = state.context_bundle.ranked_sections
-    if ranked:
-        hint_lines = [
-            "Ranked sections to investigate further "
-            "(call read_file with the listed line ranges):"
-        ]
-        for entry in ranked:
-            hint_lines.append(f"  {entry['path']}:")
-            for section in entry.get("sections", []):
-                hint_lines.append(f"    • {section}")
-        parts.append("\n".join(hint_lines))
 
     parts.append("Begin implementing. Make tool calls to inspect and edit the code.")
     return "\n\n".join(parts)

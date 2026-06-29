@@ -203,3 +203,12 @@ The 3 passes (13031, 11400, 12171) all had relatively straightforward, localized
 
 
 BIGGEST OBSTACLE RIGHT NOW: making this pipeline extremely effective --- GATHER CONTEXT -> read headers/call-sites and note function handles -> very good logic for agent to use read-file tool to fill in the blanks it needs
+- the agent simply doesnt know what is relevant + unread at the moment AND it doesnt know where to find it
+
+Task 1 — Navigation map per file (_render_outline_map): Every context file now starts with a NAVIGATION MAP header listing all symbols (functions, classes, methods) with exact line ranges. Traceback frames are marked ⬅ TRACEBACK FRAME (shown below) and callees are marked ← callee of traceback frame — read_file to see implementation.
+
+Task 2 — Callee annotation (_find_local_callees): For each traceback frame function, a single AST walk collects all call sites (Name.id + Attribute.attr), cross-references against the file's own outline, and surfaces local callees by name in the map. The agent now knows exactly which locally-defined functions to read_file next.
+
+Task 3 — ranked_sections removed entirely: Deleted _rank_sections from gather_context.py, all call sites, the ranked_sections field from ContextBundle in state.py, the rendering block in prompts.py, and the construction in implement.py. No LLM call in GATHER_CONTEXT anymore — the map is built deterministically.
+
+Also updated _TOOLS in the system prompt to reference the NAVIGATION MAP instead of the stale "Ranked sections" language, and replaced the two dead tests (_dedupe_frames, _build_import_subgraph) with tests for the three new functions.
