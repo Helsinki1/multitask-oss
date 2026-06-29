@@ -12,7 +12,7 @@ from __future__ import annotations
 import os
 
 from agent.context import (
-    _read_file_smart,
+    _read_file_tiered,
     build_bugfix_context,
     extract_file_outline,
     rebuild_context_from_regressions,
@@ -128,7 +128,7 @@ class GatherContextNode(Node):
                 abs_path = os.path.join(ws, pf["path"])
                 if not os.path.isfile(abs_path):
                     continue
-                content = _read_file_smart(abs_path, anchor=0, head_lines=120)
+                content = _read_file_tiered(abs_path, [], head_lines=120)
                 if content:
                     prior_files_refreshed.append({
                         "path": pf["path"],

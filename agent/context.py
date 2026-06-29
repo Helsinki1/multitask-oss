@@ -153,8 +153,8 @@ def build_bugfix_context(
     cb.repo_rules = _load_repo_rules(workspace)
     cb.build_and_test_commands = _detect_build_commands(workspace)
 
-    todo_list, tb_files = _run_and_collect(workspace, fail_to_pass, pass_to_pass)
-    cb.task_adjacent_files = _load_context_files(workspace, tb_files)
+    todo_list, tb_frames = _run_and_collect(workspace, fail_to_pass, pass_to_pass)
+    cb.task_adjacent_files = _load_context_files(workspace, tb_frames)
 
     return todo_list, cb
 
@@ -176,8 +176,7 @@ def rebuild_context_from_regressions(
         c.traceback for c in todo_list.cases if c.status == "failing" and c.traceback
     )
     frames = _parse_traceback(all_tracebacks, workspace)
-    tb_files = _dedupe_frames(frames, workspace)
-    cb.task_adjacent_files = _load_context_files(workspace, tb_files)
+    cb.task_adjacent_files = _load_context_files(workspace, frames)
 
     return cb
 
@@ -273,9 +272,7 @@ def _run_and_collect(
         cases.append(TestCase(test_id=tid, category="pass_to_pass", status=status, traceback=out if rc != 0 else ""))
 
     frames = _parse_traceback(all_tb_text, workspace)
-    tb_files = _dedupe_frames(frames, workspace)
-
-    return TestToDoList(cases=cases), tb_files
+    return TestToDoList(cases=cases), frames
 
 
 def _run_pytest(workspace: str, test_ids: list[str], flags: list[str] | None = None) -> tuple[int, str]:
@@ -331,28 +328,8 @@ def _parse_traceback(output: str, workspace: str) -> list[tuple[str, int]]:
     return frames
 
 
-def _dedupe_frames(frames: list[tuple[str, int]], workspace: str) -> list[tuple[str, int]]:
-    """Return unique (file, anchor_line) pairs from traceback frames: source files first, test files last.
-
-    anchor_line is the first-seen traceback line for that file (1-indexed).
-    The ranked_sections mechanism in GATHER_CONTEXT handles discovery of adjacent files,
-    replacing the old one-hop import graph approach.
-    """
-    seen: set[str] = set()
-    source_files: list[tuple[str, int]] = []
-    test_files: list[tuple[str, int]] = []
-
-    for path, lineno in frames:
-        if path in seen:
-            continue
-        seen.add(path)
-        parts = path.replace("\\", "/").split("/")
-        if any("test" in p.lower() for p in parts):
-            test_files.append((path, lineno))
-        else:
-            source_files.append((path, lineno))
-
-    return (source_files + test_files)[:12]
+def _is_test_path(path: str) -> bool:
+    return any("test" in p.lower() for p in path.replace("\\", "/").split("/"))
 
 
 # ── Internal: import graph ────────────────────────────────────────────────────
@@ -397,14 +374,35 @@ def _module_to_file(workspace: str, module: str) -> str | None:
 
 def _load_context_files(
     workspace: str,
-    file_anchors: list[tuple[str, int]],
+    frames: list[tuple[str, int]],
+    max_lines_per_file: int = 450,
+    head_lines: int = 60,
 ) -> list[dict]:
-    """Load context files using smart head + AST-containing-function windowing."""
-    result: list[dict] = []
-    for filepath, anchor in file_anchors:
-        if not os.path.isfile(filepath):
+    """Load context files: header + full call-site function for every traceback frame.
+
+    A file may appear at multiple depths in the traceback (different call sites).
+    All anchors for the same file are collected and read together so every call-site
+    function is included, not just the first-seen one.
+    Source files are ordered before test files; total capped at 12 files.
+    """
+    # Group all anchor lines by file, preserving first-seen file order
+    file_anchors: dict[str, list[int]] = {}
+    for path, lineno in frames:
+        if not os.path.isfile(path):
             continue
-        content = _read_file_smart(filepath, anchor)
+        if path not in file_anchors:
+            file_anchors[path] = []
+        file_anchors[path].append(lineno)
+
+    source_files = [p for p in file_anchors if not _is_test_path(p)]
+    test_files = [p for p in file_anchors if _is_test_path(p)]
+    ordered = (source_files + test_files)[:12]
+
+    result: list[dict] = []
+    for filepath in ordered:
+        content = _read_file_tiered(
+            filepath, file_anchors[filepath], max_lines_per_file, head_lines
+        )
         if content:
             result.append({
                 "path": os.path.relpath(filepath, workspace),
@@ -412,6 +410,80 @@ def _load_context_files(
                 "why": "appears in error traceback",
             })
     return result
+
+
+def _render_with_gaps(all_lines: list[str], included: list[int], total: int) -> str:
+    """Render a sorted list of 0-indexed line numbers with gap annotations."""
+    if not included:
+        return ""
+    parts: list[str] = []
+    prev = -2
+    for i in included:
+        if i != prev + 1:
+            if prev >= 0:
+                parts.append(
+                    f"     ... ({i - prev - 1} lines skipped"
+                    f" — use read_file to inspect) ...\n"
+                )
+        parts.append(f"{i + 1:4d} | {all_lines[i]}")
+        prev = i
+    tail = total - 1 - included[-1]
+    if tail > 0:
+        parts.append(f"     ... ({tail} more lines — use read_file to inspect) ...\n")
+    return "".join(parts)
+
+
+def _read_file_tiered(
+    path: str,
+    anchors: list[int],
+    max_lines: int = 450,
+    head_lines: int = 60,
+) -> str:
+    """Read file header + full containing function for every call-site anchor.
+
+    Rule: always include the first head_lines (captures imports / module-level code)
+    plus the complete AST-bounded function for each anchor line in the traceback.
+    Total line budget is capped at max_lines; if exceeded, functions are added in
+    traceback order and the remainder filled with lines closest to each anchor.
+    """
+    try:
+        with open(path, "r", encoding="utf-8", errors="ignore") as f:
+            all_lines = f.readlines()
+    except OSError:
+        return ""
+    total = len(all_lines)
+    if total == 0:
+        return ""
+
+    # Build include set: header always, then each call-site function
+    include: set[int] = set(range(min(head_lines, total)))
+    for anchor in sorted(set(anchors)):
+        if anchor <= 0 or anchor > total:
+            continue
+        fs, fe = _find_containing_function(path, anchor)
+        include.update(range(fs - 1, min(fe, total)))
+
+    if len(include) <= max_lines:
+        return _render_with_gaps(all_lines, sorted(include), total)
+
+    # Over budget: keep header, then greedily add each function in anchor order
+    trimmed: set[int] = set(range(min(head_lines, max_lines, total)))
+    for anchor in sorted(set(anchors)):
+        if len(trimmed) >= max_lines or anchor <= 0 or anchor > total:
+            continue
+        fs, fe = _find_containing_function(path, anchor)
+        func_lines = set(range(fs - 1, min(fe, total)))
+        new_lines = func_lines - trimmed
+        if len(trimmed) + len(new_lines) <= max_lines:
+            trimmed.update(func_lines)
+        else:
+            # Fill remaining budget prioritising lines closest to the anchor
+            budget = max_lines - len(trimmed)
+            anchor_0 = anchor - 1
+            by_proximity = sorted(new_lines, key=lambda x: abs(x - anchor_0))
+            trimmed.update(by_proximity[:budget])
+
+    return _render_with_gaps(all_lines, sorted(trimmed), total)
 
 
 def _read_file_lines(path: str, max_lines: int) -> str:
@@ -462,66 +534,6 @@ def _find_containing_function(path: str, anchor: int) -> tuple[int, int]:
     return best
 
 
-def _read_file_smart(path: str, anchor: int, head_lines: int = 60) -> str:
-    """Load file head (imports/deps) + full AST-bounded function around anchor.
-
-    head_lines: lines always included from the start (captures imports, class-level code).
-    anchor: 1-indexed error line from traceback; <=0 loads head only.
-    Gap/tail lines are annotated with read_file hints.
-    """
-    try:
-        with open(path, "r", encoding="utf-8", errors="ignore") as f:
-            all_lines = f.readlines()
-    except OSError:
-        return ""
-
-    total = len(all_lines)
-    if total == 0:
-        return ""
-
-    def _render(start: int, end: int) -> str:
-        return "".join(f"{i + 1:4d} | {all_lines[i]}" for i in range(start, end))
-
-    head_end = min(head_lines, total)  # 0-indexed exclusive
-
-    if anchor <= 0 or anchor > total:
-        out = _render(0, head_end)
-        if total > head_end:
-            out += f"     ... ({total - head_end} more lines — use read_file to inspect) ...\n"
-        return out
-
-    func_start, func_end = _find_containing_function(path, anchor)
-    fs_0 = func_start - 1        # 0-indexed start
-    fe_0 = min(func_end, total)  # 0-indexed exclusive end
-
-    parts: list[str] = []
-
-    if fs_0 < head_end:
-        # Function overlaps the head — merge into one continuous block
-        merged_end = max(head_end, fe_0)
-        parts.append(_render(0, merged_end))
-        if merged_end < total:
-            parts.append(
-                f"     ... ({total - merged_end} more lines — use read_file to inspect) ...\n"
-            )
-    else:
-        # Head block
-        parts.append(_render(0, head_end))
-        # Gap between head and function
-        gap = fs_0 - head_end
-        if gap > 0:
-            parts.append(
-                f"     ... ({gap} lines skipped — use read_file(path, start_line={head_end + 1},"
-                f" end_line={fs_0}) to inspect) ...\n"
-            )
-        # Containing function block
-        parts.append(_render(fs_0, fe_0))
-        if fe_0 < total:
-            parts.append(
-                f"     ... ({total - fe_0} more lines — use read_file to inspect) ...\n"
-            )
-
-    return "".join(parts)
 
 
 def _first_docstring_line(node: ast.AST) -> str:

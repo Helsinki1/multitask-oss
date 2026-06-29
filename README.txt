@@ -12,6 +12,7 @@ Done
 * after every IMPLEMENT subsession, the agent writes notes to itself that it injects into its instruction prompts in the next session
 * use majority-vote grep algorithm to map swe-bench's test IDs (plain function names) to file path where test is located (for proper execution and traceback) -- this is on a per-test-ID basis
 * in GATHER CONTEXT, we automatically extract the first 50 lines of the traceback file AND 150 lines near the error site, AND make an AST + let cheap LLM rank additional function handles that the agent should read next using read tool
+* ensure that unrelated baseline tests that were failing from the start anyway DO NOT count as regressions and are NEVER injected into prompts (ignore them, theyre not our problem)
 
 Improvements
 1. better testing environment: running tests / subagent sessions are all via "git worktree add -b" instead of a separate docker container that requires cold start
@@ -135,3 +136,70 @@ Strategy C — Harness guardrails (3 items)
 - #5 Programmatic probe-loop nudge (subsession.py): After 4 consecutive run_shell calls without any
    file edit, the harness injects a forced-edit message. Addresses agents that empirically spin
    through 10+ probes without making progress.
+
+-------------------------------------------------------------------------------------
+Hillclimb Session 3
+
+Problem 1: baseline_still_failing burns turns on pre-existing env issues
+
+What you see in the trace:
+verify: f2p_failing=[]  p2p_failing=[]
+[VERIFY] warning → IMPLEMENT
+
+This looks like VERIFY passes but still routes to IMPLEMENT. The trace doesn't display it, but verify.py:54 has a 3-part success condition:
+if not f2p_failing and not newly_failing and not baseline_still_failing:
+    → CHECKPOINT
+
+The agent notes.md files say repeatedly: "Root cause: SymPy 3.11 compatibility issues blocked import during test collection (collections.Callable)". This means some p2p tests fail at GATHER_CONTEXT time due to a pre-existing collections.MutableMapping import error — not the actual bug. Those get recorded as baseline_still_failing. VERIFY then forces the agent to fix them too, even though the real bug is already fixed. In 12419 and 12481, the agent spends the final IMPLEMENT sessions working on Python 3.11 compat shims instead of the actual regression.
+
+12481 ends like this: agent fixes f2p (f2p: true in external eval), but then spends turns patching sathandlers.py for MutableMapping — and that unrelated change likely introduces the p2p regression (p2p: false externally).
+
+---
+Problem 2: VERIFY runs tests individually; external eval runs them as a batch
+
+verify.py:_run_all_tests runs each test_id separately via its own pytest process. swe_bench_run.py:evaluate passes all p2p IDs to one pytest invocation (_pytest(pass_to_pass, stop_on_first=False)).
+
+When tests share a process, module-level state is shared across imports. A change to a module that patches a class or adds a side-effectful import can cause cross-test contamination that never appears in individual runs. This is the most likely explanation for both 12481 and 12419 passing VERIFY but failing external p2p eval.
+
+---
+Problem 3: True oscillation — test_div (12236, 60 turns, fail)
+
+This is the most wasteful case. The agent attempts 40+ replace_in_file calls on polytools.py, running test_div after each one, always getting exit code 1. A sample of the loop:
+
+turn 13: replace_in_file → polytools.py
+turn 14: run_shell → pytest test_div → exit 1
+turn 18: replace_in_file → polytools.py
+turn 19: run_shell → pytest test_div → exit 1
+...
+turn 44: replace_in_file → Error: old_text not found  ← stale diff
+[TASK] task.budget_exhausted
+
+Each new IMPLEMENT session re-reads the same files (turn 0: read_file at line 200, turn 1: read polytools.py...) because sessions start cold. The anti-oscillation strategies from the recent commit aren't preventing this because each session is genuinely "trying something new" — just something that doesn't work. The problem requires understanding polynomial domain coercion semantics that the agent doesn't converge on.
+
+---
+Problem 4: The is_upper fix gets overwritten (12454, 31 turns, fail)
+
+The pattern for 12454:
+IMPLEMENT → fix is_upper in matrices.py → VERIFY
+verify: f2p_failing=[test_is_upper, test_hessenberg] → IMPLEMENT
+IMPLEMENT → same grep + same replace → VERIFY
+verify: f2p_failing=[test_is_upper, test_hessenberg] → IMPLEMENT
+...
+[VERIFY] warning → CHECKPOINT (max retries exhausted)
+
+Every IMPLEMENT session does the identical sequence: grep is_upper → read matrices.py → replace. But the fix keeps failing VERIFY. This is oscillation on a specific test, not drift across tests — the agent isn't making the correct fix, just repeatedly applying the same wrong one, because there's no mechanism to say "this exact replacement was already tried and failed."
+
+---
+Problem 5: Context bundle isn't addressing the root failure mode
+
+The new feature (file header + error site lines) helps when the agent needs more context about what code is at the error site. But in these failing cases:
+
+- 12236 (test_div): agent reads the right files but can't reason through polynomial domain coercion. More context lines don't help reasoning quality.
+- 12454 (is_upper): agent finds the right function immediately, just applies the wrong fix repeatedly.
+- 12481 / 12419: agent's problem is p2p side effects from unrelated edits, not insufficient context.
+
+The 3 passes (13031, 11400, 12171) all had relatively straightforward, localized fixes. The failures are failing for structural reasons (oscillation, env noise, inter-test side effects) that more context at the start doesn't address.
+
+
+
+BIGGEST OBSTACLE RIGHT NOW: making this pipeline extremely effective --- GATHER CONTEXT -> read headers/call-sites and note function handles -> very good logic for agent to use read-file tool to fill in the blanks it needs
