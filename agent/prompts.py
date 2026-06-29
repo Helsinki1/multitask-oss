@@ -81,7 +81,6 @@ Your objective: make ALL fail_to_pass tests pass without breaking any pass_to_pa
 
 Fail-to-pass tests (must go from failing → passing):
 {f2p_list}
-{baseline_section}
 Pass-to-pass tests (were passing before — must stay passing):
 {p2p_id_list}
 
@@ -199,33 +198,19 @@ def build_bugfix_system(state: AgentState) -> str:
     if state.verify_attempts == 0:
         # First attempt — show objective with all f2p tests and their tracebacks
         f2p_list = _format_test_list(f2p_failing if f2p_failing else state.todo_list.cases)
-        # Build baseline section: tests that were already failing before agent started.
-        # These are caused by the same underlying bug — agent must fix them too.
-        # Cap at 20 to avoid overwhelming the agent when there are 100+ contamination failures.
+        # Exclude baseline-failing p2p tests from the "must stay passing" list — they were
+        # already broken before the agent started (env/compat issues) and are not the agent's job.
         baseline_set = set(state.baseline_p2p_failing)
         effective_p2p = [tid for tid in state.pass_to_pass if tid not in baseline_set]
-        baseline_section = _format_baseline_section(state.baseline_p2p_failing)
         layers.append(_BUGFIX_OBJECTIVE.format(
             f2p_list=f2p_list,
-            baseline_section=baseline_section,
             p2p_id_list=_format_p2p_id_list(effective_p2p),
         ))
     elif state.verify_failure_type == "f2p_failing":
         diff = _get_diff(state.workspace_path)
-        # Also show baseline tests that are still failing (treated like f2p, not regressions)
-        baseline_still_failing = [
-            c for c in state.todo_list.p2p_failing if c.test_id in baseline_set
-        ]
-        extra_baseline = ""
-        if baseline_still_failing:
-            ids = "\n".join(f"  {c.test_id}" for c in baseline_still_failing[:10])
-            extra = f"  ... and {len(baseline_still_failing) - 10} more" if len(baseline_still_failing) > 10 else ""
-            extra_baseline = (
-                f"\nAdditionally-failing (same underlying bug — also needs fixing):\n{ids}\n{extra}\n"
-            )
         layers.append(_BUGFIX_RETRY_F2P.format(
             attempt=state.verify_attempts,
-            f2p_status_list=_format_f2p_status(state.todo_list.cases) + extra_baseline,
+            f2p_status_list=_format_f2p_status(state.todo_list.cases),
             p2p_warning=_format_p2p_warning(p2p_failing),
             diff=diff[:6000],
         ))
@@ -398,22 +383,6 @@ def _format_test_list(cases: list) -> str:
             parts.append(f"  Traceback (last 30 lines):\n{_indent(snippet, '    ')}")
     return "\n".join(parts)
 
-
-def _format_baseline_section(baseline_failing: list[str]) -> str:
-    """Format baseline-failing p2p tests that the agent must also fix (same underlying bug).
-
-    Capped at 5 shown + summary to avoid overwhelming the agent with contamination cases.
-    """
-    if not baseline_failing:
-        return ""
-    shown = baseline_failing[:5]
-    lines = ["Additionally-failing tests (same underlying bug — fix these too):"]
-    for tid in shown:
-        lines.append(f"  {tid}")
-    if len(baseline_failing) > 5:
-        lines.append(f"  ... and {len(baseline_failing) - 5} more")
-    lines.append("")
-    return "\n".join(lines) + "\n"
 
 
 def _format_p2p_capped(cases: list, max_shown: int = 5) -> str:

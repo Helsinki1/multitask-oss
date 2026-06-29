@@ -63,8 +63,10 @@ class Tracer:
             print(f"  subsession complete: {data.get('status', '')}", file=sys.stderr)
         elif event_type == "verify.result":
             f2p_fail = data.get("f2p_failing", [])
-            p2p_fail = data.get("p2p_failing", [])
-            print(f"  verify: f2p_failing={f2p_fail}  p2p_failing={p2p_fail}", file=sys.stderr)
+            p2p_new = data.get("p2p_newly_failing", [])
+            p2p_base = data.get("p2p_baseline_still_failing", 0)
+            base_suffix = f"  p2p_baseline_still_failing={p2p_base}" if p2p_base else ""
+            print(f"  verify: f2p_failing={f2p_fail}  p2p_newly_failing={p2p_new}{base_suffix}", file=sys.stderr)
         elif event_type == "history.compressed":
             print(
                 f"  [compression] turn {data.get('turn')}: stale tool results truncated"

@@ -47,11 +47,15 @@ class VerifyNode(Node):
             "summary": updated_todo.summary(),
             "f2p_failing": [c.test_id for c in f2p_failing],
             "p2p_newly_failing": [c.test_id for c in newly_failing],
+            # Informational only — baseline failures are pre-existing env issues, not regressions.
+            # They do NOT block success and do NOT trigger IMPLEMENT loops.
             "p2p_baseline_still_failing": len(baseline_still_failing),
         })
 
-        # Full success: f2p pass, no new regressions, AND all baseline tests now pass
-        if not f2p_failing and not newly_failing and not baseline_still_failing:
+        # Full success: f2p pass and no new regressions.
+        # Baseline-failing tests are pre-existing env failures (e.g. Python version compat) —
+        # requiring the agent to fix them causes unrelated edits that introduce real regressions.
+        if not f2p_failing and not newly_failing:
             self.tracer.emit("verify.passed", {})
             return NodeResult(
                 next_node="CHECKPOINT",
@@ -78,7 +82,7 @@ class VerifyNode(Node):
         if newly_failing:
             failure_type = "p2p_regression"
             next_node = "GATHER_CONTEXT"
-        elif f2p_failing or baseline_still_failing:
+        elif f2p_failing:
             failure_type = "f2p_failing"
             next_node = "IMPLEMENT"
         else:
