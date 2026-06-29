@@ -11,8 +11,7 @@ Done
 * after every IMPLEMENT subsession, the agent gathers all the context it gathered and puts it in ContextBundle dict to pass to the next IMPLEMENT session, reducing re-reads (compress still applies after 20th turns)
 * after every IMPLEMENT subsession, the agent writes notes to itself that it injects into its instruction prompts in the next session
 * use majority-vote grep algorithm to map swe-bench's test IDs (plain function names) to file path where test is located (for proper execution and traceback) -- this is on a per-test-ID basis
-* make import-graph (dep graph) hopping go deeper than just 1-hop traceback
-* 
+* in GATHER CONTEXT, we automatically extract the first 50 lines of the traceback file AND 150 lines near the error site, AND make an AST + let cheap LLM rank additional function handles that the agent should read next using read tool
 
 Improvements
 1. better testing environment: running tests / subagent sessions are all via "git worktree add -b" instead of a separate docker container that requires cold start

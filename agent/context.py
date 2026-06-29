@@ -152,7 +152,6 @@ def build_bugfix_context(
     cb = ContextBundle()
     cb.repo_rules = _load_repo_rules(workspace)
     cb.build_and_test_commands = _detect_build_commands(workspace)
-    cb.repo_map = _generate_repo_map(workspace)
 
     todo_list, tb_files = _run_and_collect(workspace, fail_to_pass, pass_to_pass)
     cb.task_adjacent_files = _load_context_files(workspace, tb_files)
@@ -215,7 +214,6 @@ def build_additive_context(workspace: str, task_text: str) -> ContextBundle:
     cb = ContextBundle()
     cb.repo_rules = _load_repo_rules(workspace)
     cb.build_and_test_commands = _detect_build_commands(workspace)
-    cb.repo_map = _generate_repo_map(workspace)
 
     # Build full import graph across the workspace
     all_py = _find_python_files(workspace)
@@ -257,7 +255,7 @@ def _run_and_collect(
     workspace: str,
     fail_to_pass: list[str],
     pass_to_pass: list[str],
-) -> tuple[TestToDoList, list[str]]:
+) -> tuple[TestToDoList, list[tuple[str, int]]]:
     """Run all tests, build initial TestToDoList, return (file, anchor_line) pairs."""
     cases: list[TestCase] = []
     all_tb_text = ""
@@ -333,67 +331,31 @@ def _parse_traceback(output: str, workspace: str) -> list[tuple[str, int]]:
     return frames
 
 
-def _dedupe_frames(frames: list[tuple[str, int]], workspace: str) -> list[str]:
-    """Return unique file paths: source files first, test files last.
+def _dedupe_frames(frames: list[tuple[str, int]], workspace: str) -> list[tuple[str, int]]:
+    """Return unique (file, anchor_line) pairs from traceback frames: source files first, test files last.
 
-    Also adds one import-graph hop from source files to pick up related modules.
+    anchor_line is the first-seen traceback line for that file (1-indexed).
+    The ranked_sections mechanism in GATHER_CONTEXT handles discovery of adjacent files,
+    replacing the old one-hop import graph approach.
     """
     seen: set[str] = set()
-    source_files: list[str] = []
-    test_files: list[str] = []
+    source_files: list[tuple[str, int]] = []
+    test_files: list[tuple[str, int]] = []
 
-    for path, _lineno in frames:
+    for path, lineno in frames:
         if path in seen:
             continue
         seen.add(path)
         parts = path.replace("\\", "/").split("/")
         if any("test" in p.lower() for p in parts):
-            test_files.append(path)
+            test_files.append((path, lineno))
         else:
-            source_files.append(path)
+            source_files.append((path, lineno))
 
-    hop_seeds = source_files[:6] if source_files else test_files[:3]
-    imported = _build_import_subgraph(workspace, hop_seeds, hops=1)
-    imported_source = [f for f in imported if not any("test" in p.lower() for p in f.replace("\\", "/").split("/"))]
-    all_files = source_files + [f for f in imported_source if f not in seen] + test_files
-
-    return all_files[:12]
+    return (source_files + test_files)[:12]
 
 
 # ── Internal: import graph ────────────────────────────────────────────────────
-
-
-def _build_import_subgraph(workspace: str, seed_files: list[str], hops: int = 1) -> list[str]:
-    """Walk import statements from seed_files one hop, returning new workspace .py files."""
-    found: list[str] = []
-    seen: set[str] = set(seed_files)
-    frontier = list(seed_files)
-
-    for _ in range(hops):
-        next_frontier: list[str] = []
-        for filepath in frontier:
-            try:
-                source = open(filepath, encoding="utf-8", errors="ignore").read()
-                tree = ast.parse(source)
-            except (SyntaxError, OSError):
-                continue
-            for node in ast.walk(tree):
-                if isinstance(node, ast.ImportFrom) and node.module:
-                    cand = _module_to_file(workspace, node.module)
-                    if cand and cand not in seen:
-                        seen.add(cand)
-                        found.append(cand)
-                        next_frontier.append(cand)
-                elif isinstance(node, ast.Import):
-                    for alias in node.names:
-                        cand = _module_to_file(workspace, alias.name)
-                        if cand and cand not in seen:
-                            seen.add(cand)
-                            found.append(cand)
-                            next_frontier.append(cand)
-        frontier = next_frontier
-
-    return found
 
 
 def _build_full_import_graph(workspace: str, all_files: list[str]) -> dict[str, dict]:
@@ -435,15 +397,14 @@ def _module_to_file(workspace: str, module: str) -> str | None:
 
 def _load_context_files(
     workspace: str,
-    file_paths: list[str],
-    max_lines: int = 150,
+    file_anchors: list[tuple[str, int]],
 ) -> list[dict]:
-    """Load context files, reading up to max_lines lines with line numbers."""
+    """Load context files using smart head + AST-containing-function windowing."""
     result: list[dict] = []
-    for filepath in file_paths:
+    for filepath, anchor in file_anchors:
         if not os.path.isfile(filepath):
             continue
-        content = _read_file_lines(filepath, max_lines=max_lines)
+        content = _read_file_smart(filepath, anchor)
         if content:
             result.append({
                 "path": os.path.relpath(filepath, workspace),
@@ -454,6 +415,7 @@ def _load_context_files(
 
 
 def _read_file_lines(path: str, max_lines: int) -> str:
+    """Legacy: read first max_lines lines with line numbers. Used for prior-file refresh."""
     try:
         lines: list[str] = []
         with open(path, "r", encoding="utf-8", errors="ignore") as f:
@@ -461,10 +423,153 @@ def _read_file_lines(path: str, max_lines: int) -> str:
         for idx, line in enumerate(all_lines[:max_lines]):
             lines.append(f"{idx + 1:4d} | {line}")
         if len(all_lines) > max_lines:
-            lines.append(f"... ({len(all_lines) - max_lines} more lines)\n")
+            lines.append(f"... ({len(all_lines) - max_lines} more lines — use read_file to inspect)\n")
         return "".join(lines)
     except OSError:
         return ""
+
+
+def _find_containing_function(path: str, anchor: int) -> tuple[int, int]:
+    """Return 1-indexed (start, end) of the innermost function/class containing anchor.
+
+    Falls back to an ±80-line window if AST parse fails or no function wraps anchor.
+    """
+    try:
+        with open(path, encoding="utf-8", errors="ignore") as f:
+            source = f.read()
+        total = source.count("\n") + 1
+    except OSError:
+        return (max(1, anchor - 80), anchor + 80)
+
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return (max(1, anchor - 80), min(anchor + 80, total))
+
+    best: tuple[int, int] | None = None
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            continue
+        if not hasattr(node, "end_lineno"):
+            continue
+        if node.lineno <= anchor <= node.end_lineno:
+            span = node.end_lineno - node.lineno
+            if best is None or span < (best[1] - best[0]):
+                best = (node.lineno, node.end_lineno)
+
+    if best is None:
+        return (max(1, anchor - 80), min(anchor + 80, total))
+    return best
+
+
+def _read_file_smart(path: str, anchor: int, head_lines: int = 60) -> str:
+    """Load file head (imports/deps) + full AST-bounded function around anchor.
+
+    head_lines: lines always included from the start (captures imports, class-level code).
+    anchor: 1-indexed error line from traceback; <=0 loads head only.
+    Gap/tail lines are annotated with read_file hints.
+    """
+    try:
+        with open(path, "r", encoding="utf-8", errors="ignore") as f:
+            all_lines = f.readlines()
+    except OSError:
+        return ""
+
+    total = len(all_lines)
+    if total == 0:
+        return ""
+
+    def _render(start: int, end: int) -> str:
+        return "".join(f"{i + 1:4d} | {all_lines[i]}" for i in range(start, end))
+
+    head_end = min(head_lines, total)  # 0-indexed exclusive
+
+    if anchor <= 0 or anchor > total:
+        out = _render(0, head_end)
+        if total > head_end:
+            out += f"     ... ({total - head_end} more lines — use read_file to inspect) ...\n"
+        return out
+
+    func_start, func_end = _find_containing_function(path, anchor)
+    fs_0 = func_start - 1        # 0-indexed start
+    fe_0 = min(func_end, total)  # 0-indexed exclusive end
+
+    parts: list[str] = []
+
+    if fs_0 < head_end:
+        # Function overlaps the head — merge into one continuous block
+        merged_end = max(head_end, fe_0)
+        parts.append(_render(0, merged_end))
+        if merged_end < total:
+            parts.append(
+                f"     ... ({total - merged_end} more lines — use read_file to inspect) ...\n"
+            )
+    else:
+        # Head block
+        parts.append(_render(0, head_end))
+        # Gap between head and function
+        gap = fs_0 - head_end
+        if gap > 0:
+            parts.append(
+                f"     ... ({gap} lines skipped — use read_file(path, start_line={head_end + 1},"
+                f" end_line={fs_0}) to inspect) ...\n"
+            )
+        # Containing function block
+        parts.append(_render(fs_0, fe_0))
+        if fe_0 < total:
+            parts.append(
+                f"     ... ({total - fe_0} more lines — use read_file to inspect) ...\n"
+            )
+
+    return "".join(parts)
+
+
+def _first_docstring_line(node: ast.AST) -> str:
+    body = getattr(node, "body", [])
+    if (body and isinstance(body[0], ast.Expr) and
+            isinstance(body[0].value, ast.Constant) and
+            isinstance(body[0].value.value, str)):
+        return body[0].value.value.strip().splitlines()[0][:100]
+    return ""
+
+
+def extract_file_outline(path: str) -> list[dict]:
+    """Return all top-level functions and class methods with line ranges and docstrings.
+
+    Used by gather_context.py to build LLM ranking prompts.
+    """
+    try:
+        source = open(path, encoding="utf-8", errors="ignore").read()
+        tree = ast.parse(source)
+    except (SyntaxError, OSError):
+        return []
+
+    result: list[dict] = []
+    for node in ast.iter_child_nodes(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            result.append({
+                "name": node.name,
+                "lineno": node.lineno,
+                "end_lineno": getattr(node, "end_lineno", node.lineno),
+                "docstring": _first_docstring_line(node),
+            })
+        elif isinstance(node, ast.ClassDef):
+            result.append({
+                "name": node.name,
+                "lineno": node.lineno,
+                "end_lineno": getattr(node, "end_lineno", node.lineno),
+                "docstring": _first_docstring_line(node),
+            })
+            for child in ast.iter_child_nodes(node):
+                if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    result.append({
+                        "name": f"{node.name}.{child.name}",
+                        "lineno": child.lineno,
+                        "end_lineno": getattr(child, "end_lineno", child.lineno),
+                        "docstring": _first_docstring_line(child),
+                    })
+
+    return sorted(result, key=lambda x: x["lineno"])
 
 
 def _find_python_files(workspace: str) -> list[str]:
@@ -534,9 +639,3 @@ def _detect_build_commands(workspace: str) -> list[str]:
     return cmds
 
 
-def _generate_repo_map(workspace: str) -> str:
-    try:
-        from tools.search import get_repo_map_tool
-        return get_repo_map_tool({}, workspace)
-    except Exception:
-        return "(repo map unavailable)"

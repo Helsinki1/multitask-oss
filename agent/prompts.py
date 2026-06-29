@@ -45,7 +45,12 @@ Environment:
 _TOOLS = """\
 Tools:
 - run_shell: run any bash command (grep, find, git, pytest, pip install, etc.)
-- read_file: read a file with line numbers; use start_line/end_line to slice large files
+- read_file: read a file with line numbers
+    Slicing: read_file(path, start_line=X, end_line=Y) — load only those lines.
+    Pre-loaded context shows the file head and the error site. Whenever you see
+    "... (N lines — use read_file to inspect) ..." in context, call read_file
+    with the appropriate start_line/end_line BEFORE drawing conclusions about what
+    is or isn't there. Ranked sections below list exact line ranges to investigate.
 - write_file: create a new file (not for overwriting)
 - replace_in_file: exact-text replacement in an existing file
 
@@ -291,10 +296,22 @@ def build_implement_human(state: AgentState) -> str:
                 break
         if sections:
             parts.append(
-                "Pre-loaded context files (extracted from traceback frames — "
-                "start here; use read_file to inspect additional sections):\n"
+                "Pre-loaded context files (head + error site per file — "
+                "call read_file with start_line/end_line for any truncated sections):\n"
                 + "\n".join(sections)
             )
+
+    ranked = state.context_bundle.ranked_sections
+    if ranked:
+        hint_lines = [
+            "Ranked sections to investigate further "
+            "(call read_file with the listed line ranges):"
+        ]
+        for entry in ranked:
+            hint_lines.append(f"  {entry['path']}:")
+            for section in entry.get("sections", []):
+                hint_lines.append(f"    • {section}")
+        parts.append("\n".join(hint_lines))
 
     parts.append("Begin implementing. Make tool calls to inspect and edit the code.")
     return "\n\n".join(parts)

@@ -286,8 +286,8 @@ class ImplementNode(Node):
         updated_bundle = ContextBundle(
             repo_rules=state.context_bundle.repo_rules,
             build_and_test_commands=state.context_bundle.build_and_test_commands,
-            repo_map=state.context_bundle.repo_map,
             task_adjacent_files=state.context_bundle.task_adjacent_files + new_files,
+            ranked_sections=state.context_bundle.ranked_sections,
         )
 
         next_node = "VERIFY" if state.task_type == "bug_fix" else "VERIFY_ADDITIVE"
