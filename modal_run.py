@@ -194,7 +194,14 @@ def run_repo(
     passed = failed = errors = 0
 
     with out.open("w") as f:
-        for result in run_instance.map(ids, kwargs=static_kwargs, order_outputs=False):
+        for result in run_instance.map(ids, kwargs=static_kwargs, order_outputs=False, return_exceptions=True):
+            if isinstance(result, BaseException):
+                errors += 1
+                record = {"outcome": "map_error", "error": str(result)}
+                f.write(json.dumps(record) + "\n")
+                f.flush()
+                print(f"  [{passed+failed+errors}/{len(ids)}] MAP ERROR: {result}")
+                continue
             f.write(json.dumps(result) + "\n")
             f.flush()
             o = result.get("outcome", "?")
@@ -242,7 +249,14 @@ def run_batch(
     passed = failed = errors = 0
 
     with out.open("w") as f:
-        for result in run_instance.map(ids, kwargs=static_kwargs, order_outputs=False):
+        for result in run_instance.map(ids, kwargs=static_kwargs, order_outputs=False, return_exceptions=True):
+            if isinstance(result, BaseException):
+                errors += 1
+                record = {"outcome": "map_error", "error": str(result)}
+                f.write(json.dumps(record) + "\n")
+                f.flush()
+                print(f"  [{passed+failed+errors}/{len(ids)}] MAP ERROR: {result}")
+                continue
             f.write(json.dumps(result) + "\n")
             f.flush()
             o = result.get("outcome", "?")

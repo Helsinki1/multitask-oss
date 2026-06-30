@@ -60,7 +60,20 @@ def load_instance(
         print("ERROR: 'datasets' not installed. Run: pip install datasets", file=sys.stderr)
         sys.exit(1)
 
-    ds = load_dataset(dataset, split=split)
+    import time
+    last_exc: BaseException | None = None
+    for attempt in range(5):
+        try:
+            ds = load_dataset(dataset, split=split)
+            break
+        except Exception as exc:
+            last_exc = exc
+            if attempt < 4:
+                wait = min(2 ** attempt * 5, 60)
+                print(f"  [retry {attempt + 1}/5] load_dataset failed: {exc}. Retrying in {wait}s...", file=sys.stderr)
+                time.sleep(wait)
+    else:
+        raise last_exc  # type: ignore[misc]
 
     if instance_id is not None:
         hits = [i for i, row in enumerate(ds) if row["instance_id"] == instance_id]
