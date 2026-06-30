@@ -47,16 +47,10 @@ Tools:
 - run_shell: run any bash command (grep, find, git, pytest, pip install, etc.)
 - read_file: read a file with line numbers
     Slicing: read_file(path, start_line=X, end_line=Y) — load only those lines.
-    STRICT RULE: Never call read_file without start_line/end_line if the symbol you
-    want appears in a NAVIGATION MAP. The map gives the exact start and end line for
-    every function and class — use those numbers directly.
-    ❌ Wrong: read_file("sympy/printing/ccode.py")
-    ✓ Right:  read_file("sympy/printing/ccode.py", start_line=80, end_line=120)
-    Only read from line 1 if you specifically need imports/module-level setup that
-    isn't already visible in the pre-loaded file header.
-    Inheritance and cross-file callees: the navigation map shows "(inherits: X → file.py)"
-    and "Cross-file callees" sections. SECONDARY CONTEXT files are pre-loaded with their
-    outlines — use read_file with start_line/end_line to read any function body listed there.
+    Each pre-loaded file begins with a NAVIGATION MAP listing every symbol and its
+    exact line range. Whenever you see "... (N lines — use read_file to inspect) ..."
+    or a symbol marked "← callee" in the map, call read_file with start_line/end_line
+    BEFORE drawing conclusions about what is or isn't there.
 - write_file: create a new file (not for overwriting)
 - replace_in_file: exact-text replacement in an existing file
 
@@ -96,7 +90,7 @@ Trace the traceback to its root cause, then make the minimal correct change.
 To spot-check: run the EXACT test IDs listed above — never a directory, module, keyword
 search, or the full suite. For example: `pytest sympy/core/tests/test_basic.py::test_slots`
 Unrelated failures will mislead you.
-{baseline_note}
+
 When satisfied, summarize which files you changed, why, and the root cause you fixed.
 Then stop — the harness verifies your fix.\
 """
@@ -110,8 +104,7 @@ fail_to_pass status after last attempt:
 {p2p_warning}Your changes so far (git diff HEAD):
 {diff}
 
-Fix the still-failing tests. Use their exact test IDs to spot-check — not a keyword or file path.
-{baseline_note}\
+Fix the still-failing tests. Use their exact test IDs to spot-check — not a keyword or file path.\
 """
 
 _BUGFIX_RETRY_P2P = """\
@@ -209,43 +202,17 @@ def build_bugfix_system(state: AgentState) -> str:
         # already broken before the agent started (env/compat issues) and are not the agent's job.
         baseline_set = set(state.baseline_p2p_failing)
         effective_p2p = [tid for tid in state.pass_to_pass if tid not in baseline_set]
-        baseline_p2p = [tid for tid in state.pass_to_pass if tid in baseline_set]
-        if baseline_p2p:
-            ids = "\n".join(f"  {tid}" for tid in baseline_p2p[:8])
-            baseline_note = (
-                f"\nOnce the fail_to_pass tests pass, also run and fix these"
-                f" {len(baseline_p2p)} pre-existing failures if you have turns remaining"
-                " (they count toward the final score but were already broken before"
-                " your changes — env/compat issues, not your fault):\n"
-                f"{ids}\n"
-            )
-        else:
-            baseline_note = ""
         layers.append(_BUGFIX_OBJECTIVE.format(
             f2p_list=f2p_list,
             p2p_id_list=_format_p2p_id_list(effective_p2p),
-            baseline_note=baseline_note,
         ))
     elif state.verify_failure_type == "f2p_failing":
         diff = _get_diff(state.workspace_path)
-        # Show baseline p2p failures in retry so agent can fix them alongside the f2p fix
-        baseline_p2p = [tid for tid in state.pass_to_pass if tid in baseline_set]
-        if baseline_p2p:
-            ids = "\n".join(f"  {tid}" for tid in baseline_p2p[:8])
-            retry_baseline_note = (
-                f"\nAlso: {len(baseline_p2p)} pass_to_pass test(s) were already failing"
-                " before your changes. After fixing the f2p test, run these and fix any"
-                " remaining import/env issues — they count toward the final score:\n"
-                f"{ids}\n"
-            )
-        else:
-            retry_baseline_note = ""
         layers.append(_BUGFIX_RETRY_F2P.format(
             attempt=state.verify_attempts,
             f2p_status_list=_format_f2p_status(state.todo_list.cases),
             p2p_warning=_format_p2p_warning(p2p_failing),
             diff=diff[:6000],
-            baseline_note=retry_baseline_note,
         ))
     else:  # p2p_regression
         diff = _get_diff(state.workspace_path)
@@ -314,15 +281,13 @@ def build_implement_human(state: AgentState) -> str:
                 break
         if sections:
             parts.append(
-                "Pre-loaded context files — each begins with a NAVIGATION MAP.\n"
+                "Pre-loaded context files — each begins with a NAVIGATION MAP listing "
+                "every function/class with its exact line range.\n"
                 "  ⬅ TRACEBACK FRAME = already shown in full below the map.\n"
-                "  ← callee (same file) = use read_file(path, start_line=X, end_line=Y).\n"
-                "  (inherits: X → file.py) = base class; that file is included as SECONDARY CONTEXT.\n"
-                "  Cross-file callees = imported names called by frames; included as SECONDARY CONTEXT.\n"
-                "SECONDARY CONTEXT — files imported by the test or called cross-file:\n"
-                "  The specific classes/functions referenced are pre-loaded with their actual code.\n"
-                "  Use read_file(path, start_line=X, end_line=Y) for other bodies listed in the map.\n"
-                "NEVER call read_file without start_line/end_line for a function already in the map.\n\n"
+                "  ← callee = called by a traceback frame; use read_file to see it.\n"
+                "Use read_file(path, start_line=X, end_line=Y) for any symbol in the map "
+                "that is not already shown. Do not read from line 1 unless you need the header "
+                "— the map tells you exactly where each function starts.\n\n"
                 + "\n".join(sections)
             )
 

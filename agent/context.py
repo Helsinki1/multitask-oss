@@ -154,15 +154,7 @@ def build_bugfix_context(
     cb.build_and_test_commands = _detect_build_commands(workspace)
 
     todo_list, tb_frames = _run_and_collect(workspace, fail_to_pass, pass_to_pass)
-    # Extract just the file paths from f2p test IDs so test-import traversal can
-    # always reach the source files, even when the traceback shows an ImportError.
-    f2p_test_files = list({
-        os.path.join(workspace, tid.split("::")[0])
-        for tid in fail_to_pass
-    })
-    cb.task_adjacent_files = _load_context_files(
-        workspace, tb_frames, f2p_test_files=f2p_test_files
-    )
+    cb.task_adjacent_files = _load_context_files(workspace, tb_frames)
 
     return todo_list, cb
 
@@ -367,136 +359,17 @@ def _build_full_import_graph(workspace: str, all_files: list[str]) -> dict[str, 
     return {fp: {"imported_by_count": imported_by.get(fp, 0)} for fp in all_files}
 
 
-def _module_to_file(workspace: str, module: str, relative_to: str = "") -> str | None:
-    """Resolve a dotted module name to an on-disk .py file.
-
-    relative_to: if non-empty, the directory of the file containing the import
-    (used to resolve relative imports like '.matexpr').
-    """
-    if not module:
-        return None
-    base = relative_to if relative_to else workspace
-    direct = os.path.join(base, module.replace(".", os.sep) + ".py")
+def _module_to_file(workspace: str, module: str) -> str | None:
+    direct = os.path.join(workspace, module.replace(".", os.sep) + ".py")
     if os.path.isfile(direct):
         return direct
-    pkg = os.path.join(base, module.replace(".", os.sep), "__init__.py")
+    pkg = os.path.join(workspace, module.replace(".", os.sep), "__init__.py")
     if os.path.isfile(pkg):
         return pkg
-    # Fallback: try from workspace root if relative resolution failed
-    if relative_to:
-        return _module_to_file(workspace, module)
     return None
 
 
 # ── Internal: file loading ────────────────────────────────────────────────────
-
-
-def _parse_imports(path: str) -> dict[str, str]:
-    """Return {imported_name: dotted_module} for every import in path.
-
-    Handles both `from pkg import name` and `import pkg.mod [as alias]`.
-    """
-    try:
-        source = open(path, encoding="utf-8", errors="ignore").read()
-        tree = ast.parse(source)
-    except (SyntaxError, OSError):
-        return {}
-
-    result: dict[str, str] = {}
-    for node in ast.walk(tree):
-        if isinstance(node, ast.ImportFrom) and node.module:
-            for alias in node.names:
-                local = alias.asname if alias.asname else alias.name
-                result[local] = node.module
-        elif isinstance(node, ast.Import):
-            for alias in node.names:
-                local = alias.asname if alias.asname else alias.name
-                result[local] = alias.name
-    return result
-
-
-def _find_cross_file_callees(
-    path: str,
-    func_starts: list[int],
-    workspace: str,
-) -> dict[str, str]:
-    """Return {called_name: resolved_file_path} for imported names called by frame functions.
-
-    Traces import statements in path, then walks each frame function body to find
-    calls to imported names and resolves the module to an on-disk .py file.
-    """
-    imports = _parse_imports(path)
-    if not imports:
-        return {}
-
-    try:
-        source = open(path, encoding="utf-8", errors="ignore").read()
-        tree = ast.parse(source)
-    except (SyntaxError, OSError):
-        return {}
-
-    func_start_set = set(func_starts)
-    called: set[str] = set()
-    for node in ast.walk(tree):
-        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            continue
-        if node.lineno not in func_start_set:
-            continue
-        for child in ast.walk(node):
-            if isinstance(child, ast.Call):
-                if isinstance(child.func, ast.Name):
-                    called.add(child.func.id)
-                elif isinstance(child.func, ast.Attribute):
-                    called.add(child.func.attr)
-
-    result: dict[str, str] = {}
-    for name in called:
-        if name not in imports:
-            continue
-        module = imports[name]
-        resolved = _module_to_file(workspace, module)
-        if resolved and os.path.isfile(resolved):
-            result[name] = resolved
-    return result
-
-
-def _find_class_base_files(
-    path: str,
-    workspace: str,
-    outline: list[dict],
-) -> dict[str, list[tuple[str, str]]]:
-    """Return {class_name: [(base_name, base_file_path)]} for classes defined in path.
-
-    Only includes base classes that resolve to a .py file in the workspace.
-    """
-    imports = _parse_imports(path)
-    class_names = {e["name"] for e in outline if "." not in e["name"]}
-
-    try:
-        source = open(path, encoding="utf-8", errors="ignore").read()
-        tree = ast.parse(source)
-    except (SyntaxError, OSError):
-        return {}
-
-    result: dict[str, list[tuple[str, str]]] = {}
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.ClassDef) or node.name not in class_names:
-            continue
-        bases: list[tuple[str, str]] = []
-        for base in node.bases:
-            base_name = None
-            if isinstance(base, ast.Name):
-                base_name = base.id
-            elif isinstance(base, ast.Attribute):
-                base_name = base.attr
-            if not base_name or base_name not in imports:
-                continue
-            resolved = _module_to_file(workspace, imports[base_name])
-            if resolved and os.path.isfile(resolved):
-                bases.append((base_name, resolved))
-        if bases:
-            result[node.name] = bases
-    return result
 
 
 def _find_local_callees(
@@ -542,14 +415,11 @@ def _render_outline_map(
     frame_lines: set[int],
     callee_names: set[str],
     rel_path: str,
-    class_bases: dict[str, list[tuple[str, str]]] | None = None,
-    cross_file_callees: dict[str, str] | None = None,
-    workspace: str = "",
 ) -> str:
     """Render a navigation map: all symbols with line ranges, traceback frames and callees marked.
 
-    Also shows inheritance chains and cross-file callees so the agent knows where
-    to read_file() next without grepping or reading from line 1.
+    The agent uses this map to know exactly what exists in the file and what line
+    range to pass to read_file() for any symbol it wants to inspect.
     """
     if not outline:
         return ""
@@ -570,23 +440,13 @@ def _render_outline_map(
         is_frame = any(lo <= fl <= hi for fl in frame_lines)
         is_callee = base in callee_names and not is_frame
 
-        has_children = not is_method and any(e["name"].startswith(name + ".") for e in outline)
-        if has_children:
+        if not is_method and any(e["name"].startswith(name + ".") for e in outline):
             label = f"class {name}"
         else:
             label = base if is_method else name
 
         doc = entry.get("docstring", "")
         doc_suffix = f" — {doc}" if doc else ""
-
-        # Add inheritance annotation for class entries
-        inherit_suffix = ""
-        if has_children and class_bases and name in class_bases:
-            parts = []
-            for base_name, base_file in class_bases[name]:
-                rel = os.path.relpath(base_file, workspace) if workspace else base_file
-                parts.append(f"{base_name} → {rel}")
-            inherit_suffix = f" (inherits: {', '.join(parts)})"
 
         if is_frame:
             marker = "  ⬅ TRACEBACK FRAME (shown below)"
@@ -595,14 +455,7 @@ def _render_outline_map(
         else:
             marker = ""
 
-        lines.append(f"{indent}{label} [lines {lo}–{hi}]{inherit_suffix}{doc_suffix}{marker}")
-
-    # Cross-file callees section
-    if cross_file_callees:
-        lines.append("  Cross-file callees (imported by traceback frames — see secondary context below):")
-        for cname, cfile in cross_file_callees.items():
-            rel = os.path.relpath(cfile, workspace) if workspace else cfile
-            lines.append(f"    {cname} → {rel}")
+        lines.append(f"{indent}{label} [lines {lo}–{hi}]{doc_suffix}{marker}")
 
     return "\n".join(lines)
 
@@ -612,26 +465,17 @@ def _load_context_files(
     frames: list[tuple[str, int]],
     max_lines_per_file: int = 450,
     head_lines: int = 60,
-    f2p_test_files: list[str] | None = None,
 ) -> list[dict]:
     """Load context files: navigation map + header + all call-site functions.
 
     For each traceback file:
-      - NAVIGATION MAP lists every symbol with its exact line range, marking:
-          ⬅ TRACEBACK FRAME — already shown in full below
-          ← callee — called by frame function in same file
-          (inherits: X → file.py) — class base chain, file included as secondary context
-          Cross-file callees section — imported names called by frame functions
+      - NAVIGATION MAP lists every symbol with its exact line range, marking traceback
+        frames (shown below) and callees of those frames (need read_file).
       - File content shows the first head_lines (imports/module setup) plus the full
         AST-bounded function for every traceback anchor in that file.
 
-    Secondary context (base classes + cross-file callees) is appended after primary
-    files with outline-only maps so the agent can navigate without reading from line 1.
-    Source files come before test files; primary capped at 10, secondary at 4.
-
-    f2p_test_files: if provided, test-import traversal always runs for these files
-    (regardless of whether they appear in the traceback). This ensures the agent sees
-    the implementation files even when the test fails with an ImportError.
+    A file may appear at multiple traceback depths; all its anchors are collected so
+    every call-site function is shown. Source files come before test files; capped at 12.
     """
     file_anchors: dict[str, list[int]] = {}
     for path, lineno in frames:
@@ -643,11 +487,7 @@ def _load_context_files(
 
     source_files = [p for p in file_anchors if not _is_test_path(p)]
     test_files = [p for p in file_anchors if _is_test_path(p)]
-    ordered = (source_files + test_files)[:10]
-
-    # Collect secondary files (base classes + cross-file callees) during primary pass
-    secondary: dict[str, str] = {}       # file_path → reason string
-    secondary_anchors: dict[str, list[int]] = {}  # file_path → list of anchor line numbers
+    ordered = (source_files + test_files)[:12]
 
     result: list[dict] = []
     for filepath in ordered:
@@ -664,41 +504,7 @@ def _load_context_files(
         ]
         callee_names = _find_local_callees(filepath, func_starts, outline)
 
-        # Resolve cross-file callees (imported names called by frame functions)
-        cross_file = _find_cross_file_callees(filepath, func_starts, workspace)
-        # Exclude files already in primary context
-        cross_file = {k: v for k, v in cross_file.items() if v not in file_anchors}
-        # Group callees by target file so we can record all relevant anchors per file
-        cross_file_by_dep: dict[str, list[str]] = {}
-        for name, dep_file in cross_file.items():
-            cross_file_by_dep.setdefault(dep_file, []).append(name)
-        for dep_file, names in cross_file_by_dep.items():
-            if dep_file not in secondary:
-                secondary[dep_file] = (
-                    f"cross-file callees {names!r} called by traceback frame in {rel}"
-                )
-            # Record anchors so secondary rendering shows the actual function bodies
-            if dep_file not in secondary_anchors:
-                secondary_anchors[dep_file] = []
-            dep_outline = extract_file_outline(dep_file)
-            for oentry in dep_outline:
-                top = oentry["name"].split(".")[0]
-                if top in names:
-                    secondary_anchors[dep_file].append(oentry["lineno"])
-
-        # Resolve class base files
-        class_bases = _find_class_base_files(filepath, workspace, outline)
-        for class_name, bases in class_bases.items():
-            for base_name, base_file in bases:
-                if base_file not in file_anchors and base_file not in secondary:
-                    secondary[base_file] = f"base class '{base_name}' of class '{class_name}' defined in {rel}"
-
-        nav_map = _render_outline_map(
-            outline, frame_lines, callee_names, rel,
-            class_bases=class_bases,
-            cross_file_callees={k: v for k, v in cross_file.items()},
-            workspace=workspace,
-        )
+        nav_map = _render_outline_map(outline, frame_lines, callee_names, rel)
         file_content = _read_file_tiered(filepath, anchors, max_lines_per_file, head_lines)
 
         full = "\n\n".join(part for part in [nav_map, file_content] if part)
@@ -708,150 +514,6 @@ def _load_context_files(
                 "content": full,
                 "why": "appears in error traceback",
             })
-
-    # Follow named imports from f2p test files to find source files being exercised.
-    # Always runs for f2p_test_files (even when the traceback has non-test frames, e.g.
-    # an ImportError that hides the actual assertion failure). Also runs when the primary
-    # context consists only of test files (shallow traceback / assertion failure).
-    # For each found secondary file, we record line-number anchors for the imported names
-    # so the secondary context shows actual function bodies, not just outlines.
-
-    def _register_secondary_with_anchors(rfile: str, reason: str, names: list[str]) -> None:
-        """Add rfile to secondary context; record outline anchors for the listed names."""
-        if rfile in file_anchors:
-            return
-        if rfile not in secondary:
-            secondary[rfile] = reason
-        if rfile not in secondary_anchors:
-            secondary_anchors[rfile] = []
-        rfile_outline = extract_file_outline(rfile)
-        for oentry in rfile_outline:
-            top = oentry["name"].split(".")[0]
-            if top in names:
-                secondary_anchors[rfile].append(oentry["lineno"])
-
-    primary_is_test_only = all(_is_test_path(p) for p in ordered if p)
-    # Collect test files to traverse: from traceback (when all primary are tests)
-    # plus any f2p_test_files provided explicitly by the caller.
-    test_files_to_traverse: list[str] = []
-    if primary_is_test_only:
-        test_files_to_traverse = list(ordered[:3])
-    if f2p_test_files:
-        for tf in f2p_test_files:
-            abs_tf = tf if os.path.isabs(tf) else os.path.join(workspace, tf)
-            if os.path.isfile(abs_tf) and abs_tf not in test_files_to_traverse:
-                test_files_to_traverse.append(abs_tf)
-
-    if test_files_to_traverse:
-        for filepath in test_files_to_traverse[:3]:
-            try:
-                source = open(filepath, encoding="utf-8", errors="ignore").read()
-                tree = ast.parse(source)
-            except (SyntaxError, OSError):
-                continue
-            for node in ast.walk(tree):
-                if not isinstance(node, ast.ImportFrom) or not node.module:
-                    continue
-                # Only follow specific named imports, not star imports
-                if any(a.name == "*" for a in node.names):
-                    continue
-                imported_names = [a.name for a in node.names if a.name != "*"]
-                resolved = _module_to_file(workspace, node.module)
-                if not resolved or not os.path.isfile(resolved):
-                    continue
-                if _is_test_path(resolved):
-                    continue
-                if resolved in file_anchors:
-                    continue
-                rel_test = os.path.relpath(filepath, workspace)
-
-                _register_secondary_with_anchors(
-                    resolved,
-                    f"imported by test file {rel_test} — likely contains the implementation to fix",
-                    imported_names,
-                )
-
-                # If resolved is an __init__.py, follow its specific imports one more hop
-                # (__init__.py files are usually re-exports; the real code is one level deeper)
-                if resolved.endswith("__init__.py"):
-                    init_dir = os.path.dirname(resolved)
-                    try:
-                        init_src = open(resolved, encoding="utf-8", errors="ignore").read()
-                        init_tree = ast.parse(init_src)
-                    except (SyntaxError, OSError):
-                        continue
-                    for inode in ast.walk(init_tree):
-                        if not isinstance(inode, ast.ImportFrom):
-                            continue
-                        if any(a.name == "*" for a in inode.names):
-                            continue
-                        imod = inode.module or ""
-                        ilevel = inode.level  # relative import depth (0 = absolute)
-                        if ilevel > 0:
-                            # Relative import: resolve from init_dir going up (ilevel-1) dirs
-                            base_dir = init_dir
-                            for _ in range(ilevel - 1):
-                                base_dir = os.path.dirname(base_dir)
-                            iresolve = _module_to_file(workspace, imod, relative_to=base_dir) if imod else None
-                            if not iresolve:
-                                # bare relative: e.g. `from . import matexpr`
-                                for alias in inode.names:
-                                    if alias.name == "*":
-                                        continue
-                                    candidate = os.path.join(base_dir, alias.name + ".py")
-                                    if os.path.isfile(candidate):
-                                        iresolve = candidate
-                                        break
-                        else:
-                            iresolve = _module_to_file(workspace, imod) if imod else None
-                        if iresolve and os.path.isfile(iresolve) and not _is_test_path(iresolve):
-                            inames = [a.name for a in inode.names if a.name != "*"]
-                            _register_secondary_with_anchors(
-                                iresolve,
-                                f"re-exported via {os.path.relpath(resolved, workspace)}"
-                                f" (imported by test file {rel_test})",
-                                inames,
-                            )
-
-    # Append secondary files — outline + content.
-    # For files reached via test imports: full tiered read of the imported symbols
-    #   (agent sees actual code of the imported classes/functions, not just the outline).
-    # For other secondary files (base classes, cross-file callees): outline + 40-line header.
-    seen_secondary = 0
-    for dep_file, reason in secondary.items():
-        if seen_secondary >= 5:
-            break
-        if not os.path.isfile(dep_file):
-            continue
-        dep_outline = extract_file_outline(dep_file)
-        dep_rel = os.path.relpath(dep_file, workspace)
-        anchors_for_dep = secondary_anchors.get(dep_file, [])
-        dep_map = _render_outline_map(dep_outline, set(anchors_for_dep), set(), dep_rel)
-
-        if anchors_for_dep:
-            # Show actual code of the imported classes/functions
-            dep_content = _read_file_tiered(dep_file, anchors_for_dep, max_lines=350, head_lines=40)
-        else:
-            dep_content = _read_file_lines(dep_file, max_lines=40)
-            if dep_content:
-                dep_content = (
-                    "[first 40 lines — use read_file(start_line=X, end_line=Y) for any function body]\n"
-                    + dep_content
-                )
-
-        sections = [f"SECONDARY CONTEXT — included because: {reason}"]
-        if dep_map:
-            sections.append(dep_map)
-        if dep_content:
-            sections.append(dep_content)
-        if len(sections) > 1:
-            result.append({
-                "path": dep_rel,
-                "content": "\n\n".join(sections),
-                "why": reason,
-            })
-            seen_secondary += 1
-
     return result
 
 
