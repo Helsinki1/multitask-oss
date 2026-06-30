@@ -50,6 +50,7 @@ class VerifyNode(Node):
             # Informational only — baseline failures are pre-existing env issues, not regressions.
             # They do NOT block success and do NOT trigger IMPLEMENT loops.
             "p2p_baseline_still_failing": len(baseline_still_failing),
+            "p2p_baseline_still_failing_ids": [c.test_id for c in baseline_still_failing],
         })
 
         # Full success: f2p pass and no new regressions.

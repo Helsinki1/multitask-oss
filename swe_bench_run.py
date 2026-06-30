@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -121,6 +122,128 @@ def setup_workspace(instance: dict, work_dir: str) -> None:
         print("  applied and committed test_patch")
 
     _install_env(work_dir)
+    _fix_collections_compat(work_dir)
+
+
+def _fix_collections_compat(work_dir: str) -> None:
+    """Replace `from collections import X` with `from collections.abc import X` for names
+    that moved in Python 3.3 and were removed from `collections` in Python 3.10.
+
+    Uses AST to handle both single-line and multi-line parenthesized imports correctly.
+    This is a pure environment compatibility fix — not a semantic change.  The agent
+    running on Python 3.10+ would get ImportError before any test can run if these remain.
+    We apply the fix as part of workspace setup so the agent's test runs reflect the actual
+    logic of the code rather than being blocked by version-skew noise.
+    """
+    import ast as _ast
+
+    _ABC_NAMES = frozenset({
+        "Awaitable", "Coroutine", "AsyncIterable", "AsyncIterator", "AsyncGenerator",
+        "Hashable", "Iterable", "Iterator", "Generator", "Reversible",
+        "Container", "Collection", "Callable",
+        "Set", "MutableSet",
+        "Mapping", "MutableMapping", "MappingView",
+        "KeysView", "ItemsView", "ValuesView",
+        "Sequence", "MutableSequence", "ByteString", "Sized",
+    })
+
+    import re as _re
+
+    # Attribute-access pattern: `collections.Callable` → `collections.abc.Callable`
+    _abc_attr_re = _re.compile(
+        r'\bcollections\.(' + "|".join(_ABC_NAMES) + r')\b'
+    )
+
+    skip_dirs = {".git", "__pycache__", "node_modules", ".venv", "venv", ".tox", "dist", "build"}
+    patched: list[str] = []
+
+    for root, dirs, files in os.walk(work_dir):
+        dirs[:] = [d for d in dirs if d not in skip_dirs]
+        for fname in files:
+            if not fname.endswith(".py"):
+                continue
+            fpath = os.path.join(root, fname)
+            try:
+                content = open(fpath, encoding="utf-8", errors="ignore").read()
+            except OSError:
+                continue
+
+            changed = False
+            lines = content.splitlines(keepends=True)
+
+            # Pass 1: fix `from collections import X` using AST (handles multi-line)
+            if "from collections import" in content:
+                try:
+                    tree = _ast.parse(content)
+                except SyntaxError:
+                    tree = None
+
+                if tree:
+                    replacements: list[tuple[int, int, list[str]]] = []
+                    for node in _ast.walk(tree):
+                        if (
+                            isinstance(node, _ast.ImportFrom)
+                            and node.module == "collections"
+                            and node.level == 0
+                        ):
+                            bare_names = [a.name for a in node.names]
+                            if any(n in _ABC_NAMES for n in bare_names):
+                                end = getattr(node, "end_lineno", node.lineno)
+                                replacements.append((node.lineno, end, bare_names))
+
+                    for start, end, names in sorted(replacements, reverse=True):
+                        orig_first = lines[start - 1]
+                        indent = orig_first[: len(orig_first) - len(orig_first.lstrip())]
+                        abc_names = [n for n in names if n in _ABC_NAMES]
+                        keep_names = [n for n in names if n not in _ABC_NAMES]
+                        new_lines_chunk: list[str] = []
+                        if keep_names:
+                            new_lines_chunk.append(f"{indent}from collections import {', '.join(keep_names)}\n")
+                        if abc_names:
+                            new_lines_chunk.append(f"{indent}from collections.abc import {', '.join(abc_names)}\n")
+                        lines[start - 1 : end] = new_lines_chunk
+                        changed = True
+
+            # Pass 2: fix `collections.Callable` attribute-access style.
+            # These don't cause ImportError (import collections still works) but raise
+            # AttributeError at runtime on Python 3.10+ when the ABC name is accessed.
+            joined = "".join(lines)
+            if _abc_attr_re.search(joined):
+                new_joined = _abc_attr_re.sub(r'collections.abc.\1', joined)
+                if new_joined != joined:
+                    # Ensure `import collections.abc` is present somewhere in the file.
+                    if "import collections.abc" not in new_joined:
+                        # Insert after the last `import collections` line (bare import)
+                        import_col_re = _re.compile(r'^([ \t]*import\s+collections\s*)$', _re.MULTILINE)
+                        if import_col_re.search(new_joined):
+                            new_joined = import_col_re.sub(
+                                r'\1\nimport collections.abc', new_joined, count=1
+                            )
+                        else:
+                            # No bare `import collections` found; prepend the abc import at top
+                            new_joined = "import collections.abc\n" + new_joined
+                    lines = new_joined.splitlines(keepends=True)
+                    changed = True
+
+            if changed:
+                try:
+                    open(fpath, "w", encoding="utf-8").write("".join(lines))
+                    patched.append(os.path.relpath(fpath, work_dir))
+                except OSError:
+                    pass
+
+    if patched:
+        print(f"  fixed collections.abc compat in {len(patched)} file(s)")
+        subprocess.run(["git", "add", "-A"], cwd=work_dir, check=False)
+        subprocess.run(
+            [
+                "git", "-c", "user.email=harness@swe-bench",
+                "-c", "user.name=SWE-bench Harness",
+                "commit", "--allow-empty", "-m", "harness: fix collections.abc compat (Python 3.10+)",
+            ],
+            cwd=work_dir,
+            check=False,
+        )
 
 
 def _install_env(work_dir: str) -> None:

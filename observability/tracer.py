@@ -61,11 +61,18 @@ class Tracer:
             print(f"  is_done={done} ({reason})", file=sys.stderr)
         elif event_type == "subsession.done":
             print(f"  subsession complete: {data.get('status', '')}", file=sys.stderr)
+        elif event_type == "gather_context.baseline_p2p_failing":
+            ids = data.get("test_ids", [])
+            count = data.get("count", len(ids))
+            print(f"  [baseline p2p failing before agent] {count} tests: {ids}", file=sys.stderr)
         elif event_type == "verify.result":
             f2p_fail = data.get("f2p_failing", [])
             p2p_new = data.get("p2p_newly_failing", [])
             p2p_base = data.get("p2p_baseline_still_failing", 0)
+            p2p_base_ids = data.get("p2p_baseline_still_failing_ids", [])
             base_suffix = f"  p2p_baseline_still_failing={p2p_base}" if p2p_base else ""
+            if p2p_base_ids:
+                base_suffix += f"\n    baseline_ids={p2p_base_ids}"
             print(f"  verify: f2p_failing={f2p_fail}  p2p_newly_failing={p2p_new}{base_suffix}", file=sys.stderr)
         elif event_type == "history.compressed":
             print(

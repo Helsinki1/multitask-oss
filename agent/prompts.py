@@ -55,9 +55,11 @@ Tools:
 - replace_in_file: exact-text replacement in an existing file
 
 IMPORTANT — editing files:
-  Prefer replace_in_file over Python inline patches (python -c / heredoc in run_shell).
-  replace_in_file is atomic, easily reversible, and does not fail from shell quoting issues.
-  Only use inline Python for complex transforms that require string operations across the whole file.
+  ALWAYS use replace_in_file for code edits — never Python inline patches (python -c / heredoc).
+  Why: text.replace(old, new) returns the UNCHANGED file silently when old doesn't match —
+  you get no error, the test still fails, and you waste retries. replace_in_file raises an
+  error immediately when old_str is not found, so you know right away and can correct the
+  old string. Use inline Python ONLY for whole-file structural rewrites.
 
 Useful git commands:
 - git diff HEAD          — see all your changes so far
@@ -103,6 +105,10 @@ fail_to_pass status after last attempt:
 
 {p2p_warning}Your changes so far (git diff HEAD):
 {diff}
+
+Before reverting any of the above changes, confirm they are wrong — run the failing test \
+with and without each change. Compatibility fixes (e.g. import paths) may be necessary \
+prerequisites even if the main test still fails afterward.
 
 Fix the still-failing tests. Use their exact test IDs to spot-check — not a keyword or file path.\
 """

@@ -1,10 +1,7 @@
-{"instance_id": "sympy__sympy-13043", "outcome": "pass", "test_results": {"fail_to_pass": true, "pass_to_pass": true}, "status": "done", "turns": 19, "cost_usd": 0.2001}
-{"instance_id": "sympy__sympy-12481", "outcome": "fail", "test_results": {"fail_to_pass": true, "pass_to_pass": false}, "status": "done", "turns": 19, "cost_usd": 0.2817}
-{"instance_id": "sympy__sympy-12171", "outcome": "fail", "test_results": {"fail_to_pass": false, "pass_to_pass": false}, "status": "done", "turns": 27, "cost_usd": 0.2456}
-{"instance_id": "sympy__sympy-12419", "outcome": "fail", "test_results": {"fail_to_pass": true, "pass_to_pass": false}, "status": "done", "turns": 33, "cost_usd": 0.5415}
-{"instance_id": "sympy__sympy-13031", "outcome": "pass", "test_results": {"fail_to_pass": true, "pass_to_pass": true}, "status": "done", "turns": 56, "cost_usd": 0.6927}
-{"instance_id": "sympy__sympy-11400", "outcome": "pass", "test_results": {"fail_to_pass": true, "pass_to_pass": true}, "status": "done", "turns": 47, "cost_usd": 0.8963}
-{"instance_id": "sympy__sympy-11870", "outcome": "fail", "test_results": {"fail_to_pass": true, "pass_to_pass": false}, "status": "done", "turns": 44, "cost_usd": 0.5737}
-{"instance_id": "sympy__sympy-11897", "outcome": "fail", "test_results": {"fail_to_pass": false, "pass_to_pass": false}, "status": "done", "turns": 60, "cost_usd": 1.2087}
-{"instance_id": "sympy__sympy-12236", "outcome": "fail", "test_results": {"fail_to_pass": false, "pass_to_pass": false}, "status": "done", "turns": 60, "cost_usd": 0.9411}
-{"instance_id": "sympy__sympy-12454", "outcome": "fail", "test_results": {"fail_to_pass": false, "pass_to_pass": false}, "status": "done", "turns": 48, "cost_usd": 0.5416}
+{"instance_id": "sympy__sympy-13043", "outcome": "pass", "test_results": {"fail_to_pass": true, "pass_to_pass": true}, "status": "done", "turns": 10, "cost_usd": 0.0966}
+{"instance_id": "sympy__sympy-13031", "outcome": "pass", "test_results": {"fail_to_pass": true, "pass_to_pass": true}, "status": "done", "turns": 13, "cost_usd": 0.1843}
+{"instance_id": "sympy__sympy-12481", "outcome": "pass", "test_results": {"fail_to_pass": true, "pass_to_pass": true}, "status": "done", "turns": 16, "cost_usd": 0.339}
+{"instance_id": "sympy__sympy-12171", "outcome": "pass", "test_results": {"fail_to_pass": true, "pass_to_pass": true}, "status": "done", "turns": 24, "cost_usd": 0.3389}
+{"instance_id": "sympy__sympy-11400", "outcome": "pass", "test_results": {"fail_to_pass": true, "pass_to_pass": true}, "status": "done", "turns": 24, "cost_usd": 0.513}
+{"instance_id": "sympy__sympy-12419", "outcome": "pass", "test_results": {"fail_to_pass": true, "pass_to_pass": true}, "status": "done", "turns": 17, "cost_usd": 0.2916}
+{"instance_id": "sympy__sympy-11897", "outcome": "fail", "test_results": {"fail_to_pass": false, "pass_to_pass": false}, "status": "done", "turns": 0, "cost_usd": 0.0}

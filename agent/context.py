@@ -143,6 +143,12 @@ def build_bugfix_context(
 
     Returns the initial TestToDoList (all tests run once) and a ContextBundle
     whose task_adjacent_files come from traceback frames + one import-graph hop.
+
+    When an f2p test fails with an import-phase error (ImportError, ModuleNotFoundError,
+    SyntaxError) the real implementation files never appear in the traceback — only the
+    error site does.  To compensate, we follow the test file's static imports and add the
+    imported source files to the context, anchored at the imported names so the agent sees
+    the actual class/method bodies rather than just a file header.
     """
     # Resolve bare/Django test IDs using ALL test IDs for stronger majority voting
     all_resolved = resolve_test_ids(workspace, fail_to_pass + pass_to_pass)
@@ -154,7 +160,13 @@ def build_bugfix_context(
     cb.build_and_test_commands = _detect_build_commands(workspace)
 
     todo_list, tb_frames = _run_and_collect(workspace, fail_to_pass, pass_to_pass)
-    cb.task_adjacent_files = _load_context_files(workspace, tb_frames)
+
+    # Follow test file imports to surface implementation files not in the traceback.
+    tb_file_set = {f for f, _ in tb_frames}
+    extra_frames = _frames_from_test_imports(workspace, todo_list, existing_frames=tb_file_set)
+    all_frames = tb_frames + [f for f in extra_frames if f not in set(tb_frames)]
+
+    cb.task_adjacent_files = _load_context_files(workspace, all_frames)
 
     return todo_list, cb
 
@@ -248,6 +260,133 @@ def build_additive_context(workspace: str, task_text: str) -> ContextBundle:
 
 
 # ── Internal: test running ────────────────────────────────────────────────────
+
+
+def _is_import_phase_failure(output: str) -> bool:
+    """Return True when a pytest run failed before any test ran — import/syntax errors."""
+    markers = [
+        "ImportError", "ModuleNotFoundError", "SyntaxError",
+        "ERROR collecting", "import error",
+    ]
+    return any(m in output for m in markers)
+
+
+def _frames_from_test_imports(
+    workspace: str,
+    todo_list: TestToDoList,
+    existing_frames: set[str] | None = None,
+) -> list[tuple[str, int]]:
+    """Follow failing f2p test files' static imports to surface implementation files.
+
+    For each failing f2p test, parses the test file's `from X import Y` statements,
+    follows them through package __init__.py re-exports, and returns (source_file,
+    anchor_line) pairs for every implementation file that defines an imported name.
+
+    This fires in two scenarios:
+    1. Import-phase failure (ImportError/SyntaxError): the traceback shows the error
+       site (e.g. basic.py), not the code the test actually exercises.
+    2. Assertion/runtime failure where the traceback only has test-file frames: the
+       call to the implementation was in a Python expression that pytest didn't include
+       in the traceback (e.g. `assert Identity(n)[i,j] == KroneckerDelta(i,j)`).
+
+    Files already present in `existing_frames` are skipped — the caller should
+    deduplicate, but skipping early avoids redundant anchor lookups.
+    """
+    extra: list[tuple[str, int]] = []
+    seen: set[str] = set(existing_frames or ())
+
+    for case in todo_list.cases:
+        if case.category != "fail_to_pass":
+            continue
+        if case.status != "failing":
+            continue
+
+        # Resolve the test file path from the test ID (format: path/to/test.py::test_name)
+        file_part = case.test_id.split("::")[0]
+        test_file = os.path.join(workspace, file_part) if not os.path.isabs(file_part) else file_part
+        if not os.path.isfile(test_file):
+            continue
+
+        try:
+            source = open(test_file, encoding="utf-8", errors="ignore").read()
+            tree = ast.parse(source)
+        except (SyntaxError, OSError):
+            continue
+
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.ImportFrom) or not node.module:
+                continue
+            imported_names = [a.name for a in node.names if a.name != "*"]
+            if not imported_names:
+                continue
+
+            resolved = _module_to_file(workspace, node.module)
+            if not resolved or not os.path.isfile(resolved) or _is_test_path(resolved):
+                continue
+
+            # __init__.py files are usually re-export hubs; follow their imports one
+            # more hop to find the file that actually defines the imported names.
+            candidates: list[tuple[str, list[str]]] = []
+            if resolved.endswith("__init__.py"):
+                pkg_dir = os.path.dirname(resolved)
+                try:
+                    init_src = open(resolved, encoding="utf-8", errors="ignore").read()
+                    init_tree = ast.parse(init_src)
+                    for inode in ast.walk(init_tree):
+                        if not isinstance(inode, ast.ImportFrom):
+                            continue
+                        sub_names = [a.name for a in inode.names if a.name != "*" and a.name in imported_names]
+                        if not sub_names:
+                            continue
+                        imod = inode.module or ""
+                        # Handle relative imports (from .matexpr import Identity)
+                        if inode.level > 0:
+                            # Each leading dot goes up one package level from pkg_dir
+                            base_dir = pkg_dir
+                            for _ in range(inode.level - 1):
+                                base_dir = os.path.dirname(base_dir)
+                            sub = _module_to_file(workspace, imod, relative_to=base_dir) if imod else None
+                            if not sub:
+                                for alias in inode.names:
+                                    if alias.name in imported_names:
+                                        cand = os.path.join(base_dir, alias.name + ".py")
+                                        if os.path.isfile(cand):
+                                            sub = cand
+                                            break
+                        else:
+                            sub = _module_to_file(workspace, imod) if imod else None
+                        if sub and os.path.isfile(sub) and not _is_test_path(sub):
+                            candidates.append((sub, sub_names))
+                except (SyntaxError, OSError):
+                    pass
+                # If we found specific sub-files, skip the __init__.py itself
+                if not candidates:
+                    candidates.append((resolved, imported_names))
+            else:
+                candidates.append((resolved, imported_names))
+
+            for src_file, names in candidates:
+                if src_file in seen:
+                    continue
+                seen.add(src_file)
+
+                # Find the line numbers where the imported names are defined.
+                # These become anchors so _read_file_tiered shows the actual method bodies.
+                outline = extract_file_outline(src_file)
+                anchors_found: list[int] = []
+                for entry in outline:
+                    base = entry["name"].split(".")[-1]
+                    top = entry["name"].split(".")[0]
+                    if base in names or top in names:
+                        anchors_found.append(entry["lineno"])
+
+                if anchors_found:
+                    for lineno in anchors_found:
+                        extra.append((src_file, lineno))
+                else:
+                    extra.append((src_file, 1))
+
+    return extra
 
 
 def _run_and_collect(
@@ -359,13 +498,21 @@ def _build_full_import_graph(workspace: str, all_files: list[str]) -> dict[str, 
     return {fp: {"imported_by_count": imported_by.get(fp, 0)} for fp in all_files}
 
 
-def _module_to_file(workspace: str, module: str) -> str | None:
-    direct = os.path.join(workspace, module.replace(".", os.sep) + ".py")
+def _module_to_file(workspace: str, module: str, relative_to: str = "") -> str | None:
+    """Resolve a dotted module name to an on-disk .py file.
+
+    relative_to: directory to resolve from (for relative imports like 'matexpr' inside a package).
+    Falls back to workspace-root resolution when relative lookup fails.
+    """
+    base = relative_to if relative_to else workspace
+    direct = os.path.join(base, module.replace(".", os.sep) + ".py")
     if os.path.isfile(direct):
         return direct
-    pkg = os.path.join(workspace, module.replace(".", os.sep), "__init__.py")
+    pkg = os.path.join(base, module.replace(".", os.sep), "__init__.py")
     if os.path.isfile(pkg):
         return pkg
+    if relative_to:
+        return _module_to_file(workspace, module)
     return None
 
 

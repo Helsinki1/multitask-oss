@@ -212,3 +212,46 @@ Task 2 — Callee annotation (_find_local_callees): For each traceback frame fun
 Task 3 — ranked_sections removed entirely: Deleted _rank_sections from gather_context.py, all call sites, the ranked_sections field from ContextBundle in state.py, the rendering block in prompts.py, and the construction in implement.py. No LLM call in GATHER_CONTEXT anymore — the map is built deterministically.
 
 Also updated _TOOLS in the system prompt to reference the NAVIGATION MAP instead of the stale "Ranked sections" language, and replaced the two dead tests (_dedupe_frames, _build_import_subgraph) with tests for the three new functions.
+-----------------------------------------------------------------------------------------------------------------------
+
+HILLCLIMB SESSION — sympy__sympy-12419 (observed 2026-06-30)
+
+ISSUES DIAGNOSED (from full modal trace observation):
+
+Problem A: Import-phase errors erase real traceback context.
+When test_matexpr.py::test_Identity fails with `ImportError: cannot import name 'Mapping' from 'collections'` in basic.py, GATHER_CONTEXT only loads basic.py (the error site). matexpr.py — where Identity._entry returns the wrong value — is never in the initial context bundle. The agent starts blind to the actual bug.
+
+Problem B: Agent's grep patterns don't find _entry due to kwargs mismatch.
+The agent greps `def _entry(self, i, j)` but the real signature is `def _entry(self, i, j, **kwargs)`. The grep returns empty and the agent concludes the method doesn't exist, then goes hunting in summations.py instead.
+
+Problem C: Agent oscillates to summations.py after misreading the test.
+Because the test has `Sum(Identity[i,j], (i,1,n), (j,1,n))`, the agent incorrectly attributes the failure to the Sum evaluation layer rather than Identity._entry. This only happens because matexpr.py isn't in initial context — if it were, the agent would immediately see Identity._entry returning S.Zero.
+
+Problem D: Agent reverts working compat fixes mid-session.
+At turn 20 history compression fires. By turn 22 the agent loses confidence in its basic.py/plot.py collections fixes (which are actually correct prerequisites) and reverts them with `git checkout HEAD`. This wipes necessary groundwork and forces re-work in the next retry.
+
+FIXES IMPLEMENTED:
+
+Fix 1 (agent/context.py — _frames_from_test_imports): When any f2p test fails with an import-phase error (ImportError, ModuleNotFoundError, SyntaxError, ERROR collecting), parse the test file's static imports, follow one hop through __init__.py re-exports, and add the real source files to the context bundle anchored at the line of each imported name. For 12419, this adds matexpr.py anchored at the Identity class — so Identity._entry appears in the pre-loaded navigation map from turn 0. General fix: helps any test blocked by env compat errors.
+
+Fix 2 (agent/prompts.py — _BUGFIX_RETRY_F2P): Added anti-revert note: "Before reverting any of the above changes, confirm they are wrong — run the failing test with and without each change. Compatibility fixes may be necessary prerequisites even if the main test still fails afterward." Prevents the agent from undoing correct compat patches when it gets stuck on the remaining bug.
+
+Problem E: Pre-fix of `from collections import X` missed attribute-access pattern.
+Fixing only `from collections import Mapping` (3 files) left 4 p2p tests failing at baseline due to `collections.Callable` attribute access (e.g. `isinstance(x, collections.Callable)`) in other modules, causing pass_to_pass=false in external eval.
+
+Problem F: `_frames_from_test_imports` did not fire for assertion failures.
+After the collections pre-fix, `test_matexpr.py` could be collected and the test ran but failed on assertion (exit code 1, not 4). The `_is_import_phase_failure` guard prevented `_frames_from_test_imports` from adding matexpr.py to the initial context — so the agent started with only 2.4k tokens of context and could not see the bug.
+
+Problem G: Agent used inline Python `text.replace(old, new)` which silently fails.
+When `old` text doesn't exactly match (whitespace, indentation), `text.replace` returns the unchanged file with no error. The agent wasted 20+ turns on silent no-op patches, never seeing that its "change" had no effect. The test kept failing and the agent exhausted the turn budget.
+
+Fix 3 (swe_bench_run.py — `_fix_collections_compat`): Extended collections compat pre-fix to also handle `collections.Callable` attribute-access patterns using a regex sweep, not just `from collections import X` (AST). Now catches all 13 affected files, reducing baseline p2p failures from 25 to 0 before the agent starts. Committed as a separate git commit so the agent's diff only shows the actual bug fix.
+
+Fix 4 (agent/context.py — `_frames_from_test_imports`): Removed the `_is_import_phase_failure` guard. The function now fires for ALL failing f2p tests, not just import-phase errors. When the test runs but only has test-file frames in the traceback (assertion), this adds the implementation files (matexpr.py with Identity class anchored) to the initial context. General fix: any test where the tested code is not in the traceback.
+
+Fix 5 (agent/prompts.py — `_TOOLS`): Changed the inline-Python guidance from "prefer replace_in_file" to "ALWAYS use replace_in_file — never Python inline patches", with an explicit explanation of WHY: text.replace silently fails with no error when old text doesn't match. This eliminates the wasted retry loop from silent no-op patches.
+
+
+The official SWE-bench harness uses conda to spin up a per-instance Python environment (3.7, 3.8, 3.9, etc., depending on the repo's era). Our Modal setup uses a single fixed Python version for everything. The right solution is just to match what SWE-bench does — bake multiple Python versions into the Modal image and pick the right one per instance based on the instance metadata. Modal image builds are cached, so once built the cold start difference would be negligible.
+
+The _fix_collections_compat pre-patch is a quick workaround for a symptom (collections import errors) of the real mismatch (wrong Python version). It's also slightly risky: it modifies the workspace before the agent starts in a way SWE-bench doesn't define, which could theoretically change semantics or produce false positives on other instances.
