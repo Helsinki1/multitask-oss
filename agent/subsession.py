@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import time
 from dataclasses import dataclass, field
+from typing import Callable
 
 import openai
 
@@ -30,6 +31,11 @@ class SubsessionConfig:
     max_turns: int = 100
     max_wall_seconds: int = 7200
     max_tokens: int = 8192
+    # Called when the model produces a text-stop (no tool calls). If it returns a
+    # non-empty string, that string is injected as a user message and the loop
+    # continues instead of returning — used by GATHER_CONTEXT to enforce "read-queue
+    # must be empty before finishing" without touching the max_turns exhaustion path.
+    on_finish_check: Callable[[], str | None] | None = None
 
 
 @dataclass
@@ -225,7 +231,17 @@ def run_subsession(
                 tracer.emit("probe_loop.nudge", {"consecutive_probes": consecutive_probes, "turn": turn})
                 consecutive_probes = 0  # reset after nudge to avoid spamming
         else:
-            # Model produced a text response — implementation turn is complete
+            # Model produced a text response — implementation turn is complete,
+            # unless the caller's on_finish_check says otherwise (e.g. read-queue
+            # still has pending files).
+            if config.on_finish_check is not None:
+                not_done_reason = config.on_finish_check()
+                if not_done_reason:
+                    messages.append({"role": "user", "content": not_done_reason})
+                    tracer.emit("subsession.finish_check_rejected", {
+                        "turn": turn, "reason": not_done_reason,
+                    })
+                    continue
             return SubsessionResult(
                 status="done",
                 messages=messages,
