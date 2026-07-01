@@ -127,8 +127,13 @@ class AgentState:
 
     # Retry state
     verify_attempts: int = 0
-    verify_failure_type: str = ""  # "f2p_failing" | "p2p_regression" | ""
+    verify_failure_type: str = ""  # "f2p_failing" | "p2p_regression" | "f2p_new_error" | ""
     baseline_p2p_failing: list[str] = field(default_factory=list)  # p2p tests failing BEFORE any agent changes
+
+    # Targeted GATHER_CONTEXT re-entry (separate, smaller budget than verify_attempts —
+    # see MAX_RECONTEXT_ATTEMPTS in blueprints/nodes/verify.py)
+    recontext_attempts: int = 0
+    recontext_reason: str = ""  # what VERIFY wants the next GATHER_CONTEXT pass to investigate
 
     # Eval mode (SWE-bench etc.)
     eval_mode: bool = False
