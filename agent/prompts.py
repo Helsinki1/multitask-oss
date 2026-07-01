@@ -264,7 +264,7 @@ def build_bugfix_system(state: AgentState) -> str:
             f2p_list=f2p_list,
             p2p_id_list=_format_p2p_id_list(effective_p2p),
         ))
-    elif state.verify_failure_type == "f2p_failing":
+    elif state.verify_failure_type in ("f2p_failing", "f2p_new_error"):
         diff = _get_diff(state.workspace_path)
         layers.append(_BUGFIX_RETRY_F2P.format(
             attempt=state.verify_attempts,
