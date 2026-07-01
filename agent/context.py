@@ -1,6 +1,9 @@
-"""Algorithmic context gathering — traceback-driven (bug fix) and dep-graph (additive).
+"""Deterministic support for context gathering: test execution, traceback parsing,
+and dep-graph context (additive path). No LLM calls in this module.
 
-No LLM calls. All context is derived deterministically from test output and AST analysis.
+Bug-fix file *selection* is no longer algorithmic — see blueprints/nodes/gather_context.py
+for the agentic read-queue subsession. This module only seeds that subsession's initial
+queue (seed_gather_context) and runs tests deterministically.
 """
 
 from __future__ import annotations
@@ -131,86 +134,62 @@ def resolve_test_ids(workspace: str, test_ids: list[str]) -> list[str]:
     return result
 
 
-# ── Bug fix: traceback-driven context ────────────────────────────────────────
+# ── Bug fix: seed the GATHER_CONTEXT read-queue ───────────────────────────────
 
 
-def build_bugfix_context(
+def seed_gather_context(
     workspace: str,
     fail_to_pass: list[str],
     pass_to_pass: list[str],
-) -> tuple[TestToDoList, ContextBundle]:
-    """Run failing tests, parse tracebacks, load causally-adjacent source files.
+    prior_todo_list: TestToDoList | None = None,
+) -> tuple[TestToDoList, list[str]]:
+    """Return (todo_list, seed_file_paths) for the GATHER_CONTEXT subsession.
 
-    Returns the initial TestToDoList (all tests run once) and a ContextBundle
-    whose task_adjacent_files come from traceback frames + one import-graph hop.
+    If prior_todo_list is given (VERIFY just ran these tests this turn), reuse it
+    as-is — no test re-execution. This is the case on every recontext re-entry
+    (p2p regression / f2p new error signature): VERIFY already has fresh
+    tracebacks in todo_list, so re-running here would be pure waste.
 
-    When an f2p test fails with an import-phase error (ImportError, ModuleNotFoundError,
-    SyntaxError) the real implementation files never appear in the traceback — only the
-    error site does.  To compensate, we follow the test file's static imports and add the
-    imported source files to the context, anchored at the imported names so the agent sees
-    the actual class/method bodies rather than just a file header.
+    If prior_todo_list is None (true first entry, nothing has run yet), run
+    fail_to_pass/pass_to_pass fresh via _run_and_collect.
+
+    Either way, seed_file_paths is derived by parsing whichever tracebacks are
+    available via _parse_traceback — this is the one retained regex-based
+    traceback parse, used only to seed the agentic read-queue, not to select or
+    extract file content (that's now the subsession's job).
     """
-    # Resolve bare/Django test IDs using ALL test IDs for stronger majority voting
-    all_resolved = resolve_test_ids(workspace, fail_to_pass + pass_to_pass)
-    fail_to_pass = all_resolved[:len(fail_to_pass)]
-    pass_to_pass = all_resolved[len(fail_to_pass):]
+    if prior_todo_list is not None:
+        todo_list = prior_todo_list
+        all_tb_text = "\n".join(
+            c.traceback for c in todo_list.cases if c.status == "failing" and c.traceback
+        )
+        frames = _parse_traceback(all_tb_text, workspace)
+    else:
+        # Resolve bare/Django test IDs using ALL test IDs for stronger majority voting
+        all_resolved = resolve_test_ids(workspace, fail_to_pass + pass_to_pass)
+        fail_to_pass = all_resolved[: len(fail_to_pass)]
+        pass_to_pass = all_resolved[len(fail_to_pass):]
+        # _run_and_collect already parses frames from the fresh run — reuse them
+        # directly instead of re-parsing the same tracebacks a second time.
+        todo_list, frames = _run_and_collect(workspace, fail_to_pass, pass_to_pass)
 
-    cb = ContextBundle()
-    cb.repo_rules = _load_repo_rules(workspace)
-    cb.build_and_test_commands = _detect_build_commands(workspace)
-
-    todo_list, tb_frames = _run_and_collect(workspace, fail_to_pass, pass_to_pass)
-
-    # Follow test file imports to surface implementation files not in the traceback.
-    tb_file_set = {f for f, _ in tb_frames}
-    extra_frames = _frames_from_test_imports(workspace, todo_list, existing_frames=tb_file_set)
-    all_frames = tb_frames + [f for f in extra_frames if f not in set(tb_frames)]
-
-    cb.task_adjacent_files = _load_context_files(workspace, all_frames)
-
-    return todo_list, cb
+    seed_paths = _dedupe_seed_paths(workspace, frames)
+    return todo_list, seed_paths
 
 
-def rebuild_context_from_regressions(
-    workspace: str,
-    todo_list: TestToDoList,
-) -> ContextBundle:
-    """Re-derive context from regression tracebacks for a p2p retry.
-
-    Called by GATHER_CONTEXT when VERIFY detects pass_to_pass failures.
-    Parses the traceback already stored in each failing p2p TestCase.
-    """
-    cb = ContextBundle()
-    cb.repo_rules = _load_repo_rules(workspace)
-    cb.build_and_test_commands = _detect_build_commands(workspace)
-
-    all_tracebacks = "\n".join(
-        c.traceback for c in todo_list.cases if c.status == "failing" and c.traceback
-    )
-    frames = _parse_traceback(all_tracebacks, workspace)
-    cb.task_adjacent_files = _load_context_files(workspace, frames)
-
-    return cb
-
-
-def run_tests_update_todo(
-    workspace: str,
-    todo_list: TestToDoList,
-) -> TestToDoList:
-    """Re-run all tests in todo_list and return a new list with updated statuses."""
-    updated: list[TestCase] = []
-    for case in todo_list.cases:
-        out = _run_single_test(workspace, case.test_id)
-        passed = out.strip() and "passed" in out and "failed" not in out and "error" not in out.lower()
-        # More reliable: check exit code via subprocess directly
-        rc = _test_exit_code(workspace, case.test_id)
-        updated.append(TestCase(
-            test_id=case.test_id,
-            category=case.category,
-            status="passing" if rc == 0 else "failing",
-            traceback=out if rc != 0 else "",
-        ))
-    return TestToDoList(cases=updated)
+def _dedupe_seed_paths(workspace: str, frames: list[tuple[str, int]]) -> list[str]:
+    """Convert (abs_path, lineno) traceback frames into an ordered, deduped list
+    of workspace-relative paths, source files before test files."""
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for path, _lineno in frames:
+        if path in seen or not os.path.isfile(path):
+            continue
+        seen.add(path)
+        ordered.append(path)
+    source = [p for p in ordered if not _is_test_path(p)]
+    tests = [p for p in ordered if _is_test_path(p)]
+    return [os.path.relpath(p, workspace) for p in source + tests]
 
 
 # ── Additive: algorithmic dep-graph context ───────────────────────────────────
@@ -260,133 +239,6 @@ def build_additive_context(workspace: str, task_text: str) -> ContextBundle:
 
 
 # ── Internal: test running ────────────────────────────────────────────────────
-
-
-def _is_import_phase_failure(output: str) -> bool:
-    """Return True when a pytest run failed before any test ran — import/syntax errors."""
-    markers = [
-        "ImportError", "ModuleNotFoundError", "SyntaxError",
-        "ERROR collecting", "import error",
-    ]
-    return any(m in output for m in markers)
-
-
-def _frames_from_test_imports(
-    workspace: str,
-    todo_list: TestToDoList,
-    existing_frames: set[str] | None = None,
-) -> list[tuple[str, int]]:
-    """Follow failing f2p test files' static imports to surface implementation files.
-
-    For each failing f2p test, parses the test file's `from X import Y` statements,
-    follows them through package __init__.py re-exports, and returns (source_file,
-    anchor_line) pairs for every implementation file that defines an imported name.
-
-    This fires in two scenarios:
-    1. Import-phase failure (ImportError/SyntaxError): the traceback shows the error
-       site (e.g. basic.py), not the code the test actually exercises.
-    2. Assertion/runtime failure where the traceback only has test-file frames: the
-       call to the implementation was in a Python expression that pytest didn't include
-       in the traceback (e.g. `assert Identity(n)[i,j] == KroneckerDelta(i,j)`).
-
-    Files already present in `existing_frames` are skipped — the caller should
-    deduplicate, but skipping early avoids redundant anchor lookups.
-    """
-    extra: list[tuple[str, int]] = []
-    seen: set[str] = set(existing_frames or ())
-
-    for case in todo_list.cases:
-        if case.category != "fail_to_pass":
-            continue
-        if case.status != "failing":
-            continue
-
-        # Resolve the test file path from the test ID (format: path/to/test.py::test_name)
-        file_part = case.test_id.split("::")[0]
-        test_file = os.path.join(workspace, file_part) if not os.path.isabs(file_part) else file_part
-        if not os.path.isfile(test_file):
-            continue
-
-        try:
-            source = open(test_file, encoding="utf-8", errors="ignore").read()
-            tree = ast.parse(source)
-        except (SyntaxError, OSError):
-            continue
-
-        for node in ast.walk(tree):
-            if not isinstance(node, ast.ImportFrom) or not node.module:
-                continue
-            imported_names = [a.name for a in node.names if a.name != "*"]
-            if not imported_names:
-                continue
-
-            resolved = _module_to_file(workspace, node.module)
-            if not resolved or not os.path.isfile(resolved) or _is_test_path(resolved):
-                continue
-
-            # __init__.py files are usually re-export hubs; follow their imports one
-            # more hop to find the file that actually defines the imported names.
-            candidates: list[tuple[str, list[str]]] = []
-            if resolved.endswith("__init__.py"):
-                pkg_dir = os.path.dirname(resolved)
-                try:
-                    init_src = open(resolved, encoding="utf-8", errors="ignore").read()
-                    init_tree = ast.parse(init_src)
-                    for inode in ast.walk(init_tree):
-                        if not isinstance(inode, ast.ImportFrom):
-                            continue
-                        sub_names = [a.name for a in inode.names if a.name != "*" and a.name in imported_names]
-                        if not sub_names:
-                            continue
-                        imod = inode.module or ""
-                        # Handle relative imports (from .matexpr import Identity)
-                        if inode.level > 0:
-                            # Each leading dot goes up one package level from pkg_dir
-                            base_dir = pkg_dir
-                            for _ in range(inode.level - 1):
-                                base_dir = os.path.dirname(base_dir)
-                            sub = _module_to_file(workspace, imod, relative_to=base_dir) if imod else None
-                            if not sub:
-                                for alias in inode.names:
-                                    if alias.name in imported_names:
-                                        cand = os.path.join(base_dir, alias.name + ".py")
-                                        if os.path.isfile(cand):
-                                            sub = cand
-                                            break
-                        else:
-                            sub = _module_to_file(workspace, imod) if imod else None
-                        if sub and os.path.isfile(sub) and not _is_test_path(sub):
-                            candidates.append((sub, sub_names))
-                except (SyntaxError, OSError):
-                    pass
-                # If we found specific sub-files, skip the __init__.py itself
-                if not candidates:
-                    candidates.append((resolved, imported_names))
-            else:
-                candidates.append((resolved, imported_names))
-
-            for src_file, names in candidates:
-                if src_file in seen:
-                    continue
-                seen.add(src_file)
-
-                # Find the line numbers where the imported names are defined.
-                # These become anchors so _read_file_tiered shows the actual method bodies.
-                outline = extract_file_outline(src_file)
-                anchors_found: list[int] = []
-                for entry in outline:
-                    base = entry["name"].split(".")[-1]
-                    top = entry["name"].split(".")[0]
-                    if base in names or top in names:
-                        anchors_found.append(entry["lineno"])
-
-                if anchors_found:
-                    for lineno in anchors_found:
-                        extra.append((src_file, lineno))
-                else:
-                    extra.append((src_file, 1))
-
-    return extra
 
 
 def _run_and_collect(
@@ -516,230 +368,11 @@ def _module_to_file(workspace: str, module: str, relative_to: str = "") -> str |
     return None
 
 
-# ── Internal: file loading ────────────────────────────────────────────────────
-
-
-def _find_local_callees(
-    path: str,
-    func_starts: list[int],
-    outline: list[dict],
-) -> set[str]:
-    """Return base names of outline-defined functions called within the given functions.
-
-    func_starts: 1-indexed start lines of call-site functions (traceback frames).
-    Only returns names that are defined locally in this file (present in outline)
-    and are not the frame functions themselves.
-    """
-    try:
-        source = open(path, encoding="utf-8", errors="ignore").read()
-        tree = ast.parse(source)
-    except (SyntaxError, OSError):
-        return set()
-
-    local_names = {e["name"].split(".")[-1] for e in outline}
-    func_start_set = set(func_starts)
-    frame_names: set[str] = set()
-    called: set[str] = set()
-
-    for node in ast.walk(tree):
-        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            continue
-        if node.lineno not in func_start_set:
-            continue
-        frame_names.add(node.name)
-        for child in ast.walk(node):
-            if isinstance(child, ast.Call):
-                if isinstance(child.func, ast.Name):
-                    called.add(child.func.id)
-                elif isinstance(child.func, ast.Attribute):
-                    called.add(child.func.attr)
-
-    return (called & local_names) - frame_names
-
-
-def _render_outline_map(
-    outline: list[dict],
-    frame_lines: set[int],
-    callee_names: set[str],
-    rel_path: str,
-) -> str:
-    """Render a navigation map: all symbols with line ranges, traceback frames and callees marked.
-
-    The agent uses this map to know exactly what exists in the file and what line
-    range to pass to read_file() for any symbol it wants to inspect.
-    """
-    if not outline:
-        return ""
-
-    lines = [
-        f"NAVIGATION MAP — {rel_path} ({len(outline)} symbols)",
-        f'  To read any symbol: read_file("{rel_path}", start_line=X, end_line=Y)',
-    ]
-
-    for entry in outline:
-        name = entry["name"]
-        lo = entry["lineno"]
-        hi = entry["end_lineno"]
-        base = name.split(".")[-1]
-        is_method = "." in name
-        indent = "    " if is_method else "  "
-
-        is_frame = any(lo <= fl <= hi for fl in frame_lines)
-        is_callee = base in callee_names and not is_frame
-
-        if not is_method and any(e["name"].startswith(name + ".") for e in outline):
-            label = f"class {name}"
-        else:
-            label = base if is_method else name
-
-        doc = entry.get("docstring", "")
-        doc_suffix = f" — {doc}" if doc else ""
-
-        if is_frame:
-            marker = "  ⬅ TRACEBACK FRAME (shown below)"
-        elif is_callee:
-            marker = "  ← callee of traceback frame — read_file to see implementation"
-        else:
-            marker = ""
-
-        lines.append(f"{indent}{label} [lines {lo}–{hi}]{doc_suffix}{marker}")
-
-    return "\n".join(lines)
-
-
-def _load_context_files(
-    workspace: str,
-    frames: list[tuple[str, int]],
-    max_lines_per_file: int = 450,
-    head_lines: int = 60,
-) -> list[dict]:
-    """Load context files: navigation map + header + all call-site functions.
-
-    For each traceback file:
-      - NAVIGATION MAP lists every symbol with its exact line range, marking traceback
-        frames (shown below) and callees of those frames (need read_file).
-      - File content shows the first head_lines (imports/module setup) plus the full
-        AST-bounded function for every traceback anchor in that file.
-
-    A file may appear at multiple traceback depths; all its anchors are collected so
-    every call-site function is shown. Source files come before test files; capped at 12.
-    """
-    file_anchors: dict[str, list[int]] = {}
-    for path, lineno in frames:
-        if not os.path.isfile(path):
-            continue
-        if path not in file_anchors:
-            file_anchors[path] = []
-        file_anchors[path].append(lineno)
-
-    source_files = [p for p in file_anchors if not _is_test_path(p)]
-    test_files = [p for p in file_anchors if _is_test_path(p)]
-    ordered = (source_files + test_files)[:12]
-
-    result: list[dict] = []
-    for filepath in ordered:
-        anchors = file_anchors[filepath]
-        rel = os.path.relpath(filepath, workspace)
-
-        outline = extract_file_outline(filepath)
-        frame_lines = set(anchors)
-
-        # Map each anchor to the start line of its containing function (for AST lookup)
-        func_starts = [
-            _find_containing_function(filepath, a)[0]
-            for a in anchors if a > 0
-        ]
-        callee_names = _find_local_callees(filepath, func_starts, outline)
-
-        nav_map = _render_outline_map(outline, frame_lines, callee_names, rel)
-        file_content = _read_file_tiered(filepath, anchors, max_lines_per_file, head_lines)
-
-        full = "\n\n".join(part for part in [nav_map, file_content] if part)
-        if full:
-            result.append({
-                "path": rel,
-                "content": full,
-                "why": "appears in error traceback",
-            })
-    return result
-
-
-def _render_with_gaps(all_lines: list[str], included: list[int], total: int) -> str:
-    """Render a sorted list of 0-indexed line numbers with gap annotations."""
-    if not included:
-        return ""
-    parts: list[str] = []
-    prev = -2
-    for i in included:
-        if i != prev + 1:
-            if prev >= 0:
-                parts.append(
-                    f"     ... ({i - prev - 1} lines skipped"
-                    f" — use read_file to inspect) ...\n"
-                )
-        parts.append(f"{i + 1:4d} | {all_lines[i]}")
-        prev = i
-    tail = total - 1 - included[-1]
-    if tail > 0:
-        parts.append(f"     ... ({tail} more lines — use read_file to inspect) ...\n")
-    return "".join(parts)
-
-
-def _read_file_tiered(
-    path: str,
-    anchors: list[int],
-    max_lines: int = 450,
-    head_lines: int = 60,
-) -> str:
-    """Read file header + full containing function for every call-site anchor.
-
-    Rule: always include the first head_lines (captures imports / module-level code)
-    plus the complete AST-bounded function for each anchor line in the traceback.
-    Total line budget is capped at max_lines; if exceeded, functions are added in
-    traceback order and the remainder filled with lines closest to each anchor.
-    """
-    try:
-        with open(path, "r", encoding="utf-8", errors="ignore") as f:
-            all_lines = f.readlines()
-    except OSError:
-        return ""
-    total = len(all_lines)
-    if total == 0:
-        return ""
-
-    # Build include set: header always, then each call-site function
-    include: set[int] = set(range(min(head_lines, total)))
-    for anchor in sorted(set(anchors)):
-        if anchor <= 0 or anchor > total:
-            continue
-        fs, fe = _find_containing_function(path, anchor)
-        include.update(range(fs - 1, min(fe, total)))
-
-    if len(include) <= max_lines:
-        return _render_with_gaps(all_lines, sorted(include), total)
-
-    # Over budget: keep header, then greedily add each function in anchor order
-    trimmed: set[int] = set(range(min(head_lines, max_lines, total)))
-    for anchor in sorted(set(anchors)):
-        if len(trimmed) >= max_lines or anchor <= 0 or anchor > total:
-            continue
-        fs, fe = _find_containing_function(path, anchor)
-        func_lines = set(range(fs - 1, min(fe, total)))
-        new_lines = func_lines - trimmed
-        if len(trimmed) + len(new_lines) <= max_lines:
-            trimmed.update(func_lines)
-        else:
-            # Fill remaining budget prioritising lines closest to the anchor
-            budget = max_lines - len(trimmed)
-            anchor_0 = anchor - 1
-            by_proximity = sorted(new_lines, key=lambda x: abs(x - anchor_0))
-            trimmed.update(by_proximity[:budget])
-
-    return _render_with_gaps(all_lines, sorted(trimmed), total)
+# ── Internal: file loading (additive path only) ───────────────────────────────
 
 
 def _read_file_lines(path: str, max_lines: int) -> str:
-    """Legacy: read first max_lines lines with line numbers. Used for prior-file refresh."""
+    """Read first max_lines lines with line numbers. Used by build_additive_context."""
     try:
         lines: list[str] = []
         with open(path, "r", encoding="utf-8", errors="ignore") as f:
@@ -751,89 +384,6 @@ def _read_file_lines(path: str, max_lines: int) -> str:
         return "".join(lines)
     except OSError:
         return ""
-
-
-def _find_containing_function(path: str, anchor: int) -> tuple[int, int]:
-    """Return 1-indexed (start, end) of the innermost function/class containing anchor.
-
-    Falls back to an ±80-line window if AST parse fails or no function wraps anchor.
-    """
-    try:
-        with open(path, encoding="utf-8", errors="ignore") as f:
-            source = f.read()
-        total = source.count("\n") + 1
-    except OSError:
-        return (max(1, anchor - 80), anchor + 80)
-
-    try:
-        tree = ast.parse(source)
-    except SyntaxError:
-        return (max(1, anchor - 80), min(anchor + 80, total))
-
-    best: tuple[int, int] | None = None
-    for node in ast.walk(tree):
-        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-            continue
-        if not hasattr(node, "end_lineno"):
-            continue
-        if node.lineno <= anchor <= node.end_lineno:
-            span = node.end_lineno - node.lineno
-            if best is None or span < (best[1] - best[0]):
-                best = (node.lineno, node.end_lineno)
-
-    if best is None:
-        return (max(1, anchor - 80), min(anchor + 80, total))
-    return best
-
-
-
-
-def _first_docstring_line(node: ast.AST) -> str:
-    body = getattr(node, "body", [])
-    if (body and isinstance(body[0], ast.Expr) and
-            isinstance(body[0].value, ast.Constant) and
-            isinstance(body[0].value.value, str)):
-        return body[0].value.value.strip().splitlines()[0][:100]
-    return ""
-
-
-def extract_file_outline(path: str) -> list[dict]:
-    """Return all top-level functions and class methods with line ranges and docstrings.
-
-    Used by gather_context.py to build LLM ranking prompts.
-    """
-    try:
-        source = open(path, encoding="utf-8", errors="ignore").read()
-        tree = ast.parse(source)
-    except (SyntaxError, OSError):
-        return []
-
-    result: list[dict] = []
-    for node in ast.iter_child_nodes(tree):
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            result.append({
-                "name": node.name,
-                "lineno": node.lineno,
-                "end_lineno": getattr(node, "end_lineno", node.lineno),
-                "docstring": _first_docstring_line(node),
-            })
-        elif isinstance(node, ast.ClassDef):
-            result.append({
-                "name": node.name,
-                "lineno": node.lineno,
-                "end_lineno": getattr(node, "end_lineno", node.lineno),
-                "docstring": _first_docstring_line(node),
-            })
-            for child in ast.iter_child_nodes(node):
-                if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                    result.append({
-                        "name": f"{node.name}.{child.name}",
-                        "lineno": child.lineno,
-                        "end_lineno": getattr(child, "end_lineno", child.lineno),
-                        "docstring": _first_docstring_line(child),
-                    })
-
-    return sorted(result, key=lambda x: x["lineno"])
 
 
 def _find_python_files(workspace: str) -> list[str]:
