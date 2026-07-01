@@ -47,10 +47,11 @@ Tools:
 - run_shell: run any bash command (grep, find, git, pytest, pip install, etc.)
 - read_file: read a file with line numbers
     Slicing: read_file(path, start_line=X, end_line=Y) — load only those lines.
-    Each pre-loaded file begins with a NAVIGATION MAP listing every symbol and its
-    exact line range. Whenever you see "... (N lines — use read_file to inspect) ..."
-    or a symbol marked "← callee" in the map, call read_file with start_line/end_line
-    BEFORE drawing conclusions about what is or isn't there.
+    Pre-loaded context files are curated excerpts chosen by a prior investigation
+    pass, each tagged with why it's relevant and the exact line range it came from.
+    An excerpt is not necessarily the whole file — use read_file on the same path
+    to see more of it (surrounding code, other methods, etc.) whenever the shown
+    excerpt doesn't fully answer your question.
 - write_file: create a new file (not for overwriting)
 - replace_in_file: exact-text replacement in an existing file
 
@@ -160,6 +161,57 @@ Re-read _contract_tests.py if needed to understand what the tests expect, then f
 """
 
 
+# ── Gather-context prompt (bug fix, agentic read-queue) ───────────────────────
+
+_GATHER_BASE = """\
+You are investigating a specific bug so a separate implementation agent can fix it.
+Your only job is to gather and note evidence — you do NOT edit any files.
+
+Core rules:
+- Make exactly ONE tool call per turn. Never batch multiple tool calls in a response.
+- Every file you note should relate to why the failing test fails — you are not doing
+  a general code review. Be hyper-focused on evidence of the bug.
+- Do not modify test files or source files. You have no file-editing tools.\
+"""
+
+_GATHER_QUEUE = """\
+Tools:
+- dequeue_next(): pop the next file off your read-queue and read it in full.
+    Refuses to serve the next file until you've called note() on the current one.
+- note(path, start_line, end_line, why): record the bug-relevant section of the file
+    you just read. The harness re-reads the EXACT lines you cite from disk, so cite
+    precise, correct start_line/end_line — these become the implementation agent's
+    starting context and its read_file(path, start_line=X, end_line=Y) anchors.
+    If nothing in a file is relevant, note it anyway (start_line=1, end_line=1,
+    why="not relevant") so you can move on.
+- enqueue(path, reason): add a file to your read-queue because you suspect it's
+    relevant — e.g. a caller or definition found via grep. This is how you expand
+    beyond the traceback: use run_shell("grep -rn '<symbol>' .") to find where
+    something is defined or called, then enqueue() what looks relevant.
+- run_shell: any bash command (grep, find, git, etc.) — no editing tools are exposed.
+
+Discipline:
+- Your read-queue is seeded with every file that appears in the failing test's
+  traceback. You MUST dequeue_next() until the queue is empty and note() every file
+  you dequeue before finishing — the harness will not let you stop early with a
+  non-empty queue.
+- Stress exact file paths and line numbers in every note — vague notes are useless
+  to the implementation agent, which navigates by the anchors you give it.
+- When you are done (queue empty, everything relevant noted), respond with a short
+  text summary of what you found. Do not call any more tools once you do this.\
+"""
+
+_GATHER_RECONTEXT = """\
+This is a targeted re-investigation, not a first look — a prior implementation
+attempt already made changes. Focus specifically on:
+
+{reason}
+
+Changes made so far (git diff HEAD):
+{diff}\
+"""
+
+
 # ── Define-contract prompt (additive path only) ───────────────────────────────
 
 _DEFINE_CONTRACT_SYSTEM = """\
@@ -259,6 +311,33 @@ def build_additive_system(state: AgentState) -> str:
     return "\n\n---\n\n".join(layers)
 
 
+def build_gather_context_system(state: AgentState, recontext_reason: str) -> str:
+    layers = [_GATHER_BASE, _GATHER_QUEUE]
+    if recontext_reason:
+        diff = _get_diff(state.workspace_path)
+        layers.append(_GATHER_RECONTEXT.format(reason=recontext_reason, diff=diff[:4000]))
+    layers.append(_SAFETY)
+    return "\n\n---\n\n".join(layers)
+
+
+def build_gather_context_human(state: AgentState, seed_files: list[str]) -> str:
+    parts = [f"Task: {state.task_text}"]
+    if seed_files:
+        listed = "\n".join(f"  {p}" for p in seed_files)
+        parts.append(
+            f"Your read-queue is seeded with {len(seed_files)} file(s) from the "
+            f"failing test's traceback:\n{listed}"
+        )
+    else:
+        parts.append(
+            "Your read-queue is currently empty — no traceback frames were found "
+            "automatically. Use run_shell to locate the relevant test and source "
+            "files yourself, then enqueue() them."
+        )
+    parts.append("Call dequeue_next() to begin.")
+    return "\n\n".join(parts)
+
+
 def build_define_contract_system() -> str:
     return _DEFINE_CONTRACT_SYSTEM
 
@@ -287,13 +366,10 @@ def build_implement_human(state: AgentState) -> str:
                 break
         if sections:
             parts.append(
-                "Pre-loaded context files — each begins with a NAVIGATION MAP listing "
-                "every function/class with its exact line range.\n"
-                "  ⬅ TRACEBACK FRAME = already shown in full below the map.\n"
-                "  ← callee = called by a traceback frame; use read_file to see it.\n"
-                "Use read_file(path, start_line=X, end_line=Y) for any symbol in the map "
-                "that is not already shown. Do not read from line 1 unless you need the header "
-                "— the map tells you exactly where each function starts.\n\n"
+                "Pre-loaded context files — each excerpt was selected by a prior "
+                "investigation pass (why=\"...\") from the exact lines shown. These are "
+                "not necessarily whole files: use read_file(path, start_line=X, end_line=Y) "
+                "to see more of any file beyond what's excerpted here.\n\n"
                 + "\n".join(sections)
             )
 
